@@ -68,6 +68,11 @@ enum AutoState
 };
 AutoState acAutoState = AUTO_OFF;
 
+// ===== Local Scheduler =====
+bool radarManualOverride = false; // true = standalone radar cmd won; schedule radar blocked
+bool radarManualValue    = false;
+int  lastScheduledHour   = -1;   // edge-trigger: fires once per hour change
+
 // ===== System Mode Flag =====
 bool switch_gsm_wifi; // Will be set dynamically from memory
 bool isAPMode = false;
@@ -166,6 +171,10 @@ void healthLoop();
 void publishHealthAlert(const char *event, const char *detail);
 void calibrateRadarAuto();
 void calibrateRadarReset();
+void scheduleLoop();
+void handleScheduleCommand(JsonDocument &doc);
+void setSystemTimeFromGSM();
+void processJSON(JsonDocument &doc);
 
 // ===== Non-Blocking Delay for Responsiveness =====
 // Replaces standard delay() in blocking loops so the button always works.
@@ -879,32 +888,28 @@ void sendACFallback(bool turnOn, int targetTemp)
   ac.sendAc();
 }
 
-void callback(char *topic, byte *payload, unsigned int length)
+// ====================================================================
+// ==================== UNIFIED JSON COMMAND PARSER ===================
+// ====================================================================
+// Single source of truth for all MQTT commands.
+// Called by both callback() (WiFi) and checkIncomingData() (GSM).
+void processJSON(JsonDocument &doc)
 {
-  Serial.println("\nMessage Received:");
-  // ---> REPLACE THE STRING FOR-LOOP WITH THIS: <---
-  Serial.write(payload, length);
-  Serial.println();
-
-  // GOOD
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload, length);
-  if (error)
+  // Schedule command: "command" + "hours" array → store and return early.
+  if (doc["command"] == "temperature_control" && doc["hours"])
   {
-    Serial.println("JSON Parse Failed");
+    handleScheduleCommand(doc);
     return;
   }
 
   if (doc["radar"])
   {
-    // Extract directly as a String
     String radarStr = doc["radar"].as<String>();
     Serial.println("Received Radar Value: " + radarStr);
 
-    // Check for both Hex-style and Decimal-style inputs
     if (radarStr == "0100" || radarStr == "256")
     {
-      if (!radarAutoMode) // <--- NEW: ONLY RESET TIMER IF IT WAS PREVIOUSLY OFF
+      if (!radarAutoMode)
       {
         radarAutoMode = true;
         preferences.putBool("radar_auto", true);
@@ -915,7 +920,7 @@ void callback(char *topic, byte *payload, unsigned int length)
     }
     else if (radarStr == "0200" || radarStr == "512")
     {
-      if (radarAutoMode) // <--- NEW: ONLY UPDATE IF IT WAS PREVIOUSLY ON
+      if (radarAutoMode)
       {
         radarAutoMode = false;
         preferences.putBool("radar_auto", false);
@@ -923,87 +928,116 @@ void callback(char *topic, byte *payload, unsigned int length)
         indicateSuccess();
       }
     }
+    // Standalone radar → mark as manual override so schedule can't revert it.
+    radarManualOverride = true;
+    radarManualValue    = radarAutoMode;
+    preferences.putBool("rad_ovr",   true);
+    preferences.putBool("rad_ovr_v", radarAutoMode);
   }
 
-  // ---> PARSE ECO, OFF, AND NORMAL TEMP PARAMETERS <---
   if (doc["temperature_setting"])
   {
     currentNormalTemp = doc["temperature_setting"].as<int>();
     preferences.putInt("normal_temp", currentNormalTemp);
-    Serial.printf("Updated and Saved Normal Temp: %d°C\n", currentNormalTemp);
+    Serial.printf("Updated Normal Temp: %d°C\n", currentNormalTemp);
   }
 
-  // ---> PARSE ECO AND OFF PARAMETERS <---
   if (doc["eco"])
   {
     TEcoTemp = doc["eco"].as<int>();
-    preferences.putInt("eco_temp", TEcoTemp); // <-- NEW: Save to Flash
-    Serial.printf("Updated and Saved TEcoTemp: %d°C\n", TEcoTemp);
+    preferences.putInt("eco_temp", TEcoTemp);
+    Serial.printf("Updated TEcoTemp: %d°C\n", TEcoTemp);
   }
 
   if (doc["teco"])
   {
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
-    preferences.putULong("eco_time", TEcoTime); // <-- NEW: Save to Flash
-    Serial.printf("Updated and Saved TEcoTime: %lu ms\n", TEcoTime);
+    preferences.putULong("eco_time", TEcoTime);
+    Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
   }
 
   if (doc["toff"])
   {
     TOffTime = doc["toff"].as<unsigned long>() * 60000;
-
-    // Safeguard: Ensure TOffTime is strictly greater than TEcoTime
     if (TOffTime <= TEcoTime)
     {
       TOffTime = TEcoTime + 60000;
-      Serial.println("⚠ WARNING: TOffTime was <= TEcoTime. Auto-corrected.");
+      Serial.println("WARNING: TOffTime was <= TEcoTime. Auto-corrected.");
     }
-
-    preferences.putULong("off_time", TOffTime); // <-- NEW: Save to Flash
-    Serial.printf("Updated and Saved TOffTime: %lu ms\n", TOffTime);
+    preferences.putULong("off_time", TOffTime);
+    Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
   }
 
   if (doc["ir"])
   {
     int cmdNum = doc["ir"].as<int>();
-    Serial.printf("Received Command Code: %d\n", cmdNum);
+    Serial.printf("Received IR Command Code: %d\n", cmdNum);
 
-    if (cmdNum == 1) // Turn ON
+    if (cmdNum == 1)
     {
-      if (!playCustomButton("ir_on"))
-        sendACFallback(true, 24);
+      if (!playCustomButton("ir_on")) sendACFallback(true, 24);
       indicateIRSent();
-      // NEW: Tell the radar state machine the AC was manually turned ON
       acAutoState = AUTO_ON_NORMAL;
     }
-    else if (cmdNum == 2) // Turn OFF
+    else if (cmdNum == 2)
     {
-      if (!playCustomButton("ir_off"))
-        sendACFallback(false, 24);
+      if (!playCustomButton("ir_off")) sendACFallback(false, 24);
       indicateIRSent();
-      // NEW: Tell the radar state machine the AC was manually turned OFF
       acAutoState = AUTO_OFF;
     }
-    else if (cmdNum >= 3 && cmdNum <= 17) // Temperatures
+    else if (cmdNum >= 3 && cmdNum <= 17)
     {
       int targetTemp = cmdNum + 13;
       String customKey = "ir_" + String(targetTemp);
-
-      Serial.printf("Action: Set Temp to %d\n", targetTemp);
-
-      // Try the custom button first, fallback to the Universal AC protocol if not trained
-      if (!playCustomButton(customKey.c_str()))
-      {
-        sendACFallback(true, targetTemp);
-      }
+      Serial.printf("Action: Set Temp to %d°C\n", targetTemp);
+      if (!playCustomButton(customKey.c_str())) sendACFallback(true, targetTemp);
       indicateIRSent();
-      acAutoState = AUTO_ON_NORMAL; // <--- ADD THIS SO RADAR KNOWS AC IS ON
+      acAutoState = AUTO_ON_NORMAL;
     }
     else
     {
-      Serial.println("ERROR: Command out of range.");
+      Serial.println("ERROR: IR command code out of range.");
     }
   }
+
+  if (doc["protocol"])
+  {
+    const char *protoStr = doc["protocol"];
+    decode_type_t irProtocol = strToDecodeType(protoStr);
+    if (irProtocol == decode_type_t::UNKNOWN) return;
+
+    if (doc["state"])
+    {
+      JsonArray stateArray = doc["state"].as<JsonArray>();
+      uint16_t size = doc["size"] ? doc["size"].as<uint16_t>() : stateArray.size();
+      if (size > 256) { Serial.println("Error: AC state array too large"); return; }
+      uint8_t ac_state[size];
+      for (int i = 0; i < size; i++) ac_state[i] = stateArray[i].as<uint8_t>();
+      irsend.send(irProtocol, ac_state, size);
+      indicateIRSent();
+    }
+    else if (doc["code"])
+    {
+      const char *codeStr = doc["code"];
+      uint16_t bits = doc["bits"] ? doc["bits"].as<uint16_t>() : 32;
+      uint64_t irCode = strtoull(codeStr, NULL, 16);
+      irsend.send(irProtocol, irCode, bits);
+      indicateIRSent();
+    }
+  }
+}
+
+void callback(char *topic, byte *payload, unsigned int length)
+{
+  Serial.println("\n[WiFi] Message Received:");
+  Serial.write(payload, length);
+  Serial.println();
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+  if (error) { Serial.println("JSON Parse Failed"); return; }
+
+  processJSON(doc);
 }
 
 void setup_wifi()
@@ -1137,131 +1171,8 @@ void checkIncomingData()
           JsonDocument doc;
           if (!deserializeJson(doc, jsonStr))
           {
-            // ---> ADD RADAR PARSING HERE FOR GSM <---
-            if (doc["radar"])
-            {
-              String radarStr = doc["radar"].as<String>();
-
-              if (radarStr == "0100" || radarStr == "256")
-              {
-                radarAutoMode = true;
-                lastPresenceTime = millis(); // <-- NEW: Reset the empty timer to start fresh right now
-                Serial.println("GSM Radar Auto: ENABLED");
-              }
-              else if (radarStr == "0200" || radarStr == "512")
-              {
-                radarAutoMode = false;
-                Serial.println("GSM Radar Auto: DISABLED");
-              }
-            }
-
-            // ---> PARSE ECO, OFF, AND NORMAL TEMP PARAMETERS <---
-            if (doc["temperature_setting"])
-            {
-              currentNormalTemp = doc["temperature_setting"].as<int>();
-              preferences.putInt("normal_temp", currentNormalTemp);
-              Serial.printf("Updated and Saved Normal Temp: %d°C\n", currentNormalTemp);
-            }
-
-            // ---> PARSE ECO AND OFF PARAMETERS <---
-            if (doc["eco"])
-            {
-              TEcoTemp = doc["eco"].as<int>();
-              preferences.putInt("eco_temp", TEcoTemp); // <-- NEW: Save to Flash
-              Serial.printf("Updated and Saved TEcoTemp: %d°C\n", TEcoTemp);
-            }
-
-            if (doc["teco"])
-            {
-              TEcoTime = doc["teco"].as<unsigned long>() * 60000;
-              preferences.putULong("eco_time", TEcoTime); // <-- NEW: Save to Flash
-              Serial.printf("Updated and Saved TEcoTime: %lu ms\n", TEcoTime);
-            }
-
-            if (doc["toff"])
-            {
-              TOffTime = doc["toff"].as<unsigned long>() * 60000;
-
-              // Safeguard: Ensure TOffTime is strictly greater than TEcoTime
-              if (TOffTime <= TEcoTime)
-              {
-                TOffTime = TEcoTime + 60000;
-                Serial.println("⚠ WARNING: TOffTime was <= TEcoTime. Auto-corrected.");
-              }
-
-              preferences.putULong("off_time", TOffTime); // <-- NEW: Save to Flash
-              Serial.printf("Updated and Saved TOffTime: %lu ms\n", TOffTime);
-            }
-
-            if (doc["ir"])
-            {
-              int cmdNum = doc["ir"].as<int>();
-              Serial.printf("Received Command Code: %d\n", cmdNum);
-
-              if (cmdNum == 1) // Turn ON
-              {
-                if (!playCustomButton("ir_on"))
-                  sendACFallback(true, 24);
-                indicateIRSent();
-                acAutoState = AUTO_ON_NORMAL; // <--- ADD THIS
-              }
-              else if (cmdNum == 2) // Turn OFF
-              {
-                if (!playCustomButton("ir_off"))
-                  sendACFallback(false, 24);
-                indicateIRSent();
-                acAutoState = AUTO_OFF; // <--- ADD THIS
-              }
-              else if (cmdNum >= 3 && cmdNum <= 17) // Temperatures
-              {
-                int targetTemp = cmdNum + 13;
-                String customKey = "ir_" + String(targetTemp);
-
-                Serial.printf("Action: Set Temp to %d\n", targetTemp);
-
-                // Try the custom button first, fallback to Universal AC
-                if (!playCustomButton(customKey.c_str()))
-                {
-                  sendACFallback(true, targetTemp);
-                }
-                indicateIRSent();
-              }
-              else
-              {
-                Serial.println("ERROR: Command out of range.");
-              }
-            }
-            if (doc["protocol"])
-            {
-              const char *protoStr = doc["protocol"];
-              decode_type_t irProtocol = strToDecodeType(protoStr);
-              if (irProtocol == decode_type_t::UNKNOWN)
-                return;
-
-              if (doc["state"])
-              {
-                JsonArray stateArray = doc["state"].as<JsonArray>();
-                uint16_t size = doc["size"] ? doc["size"].as<uint16_t>() : stateArray.size(); // GOOD
-                if (size > 256)
-                {
-                  Serial.println("Error: AC state array too large");
-                  return;
-                }
-                uint8_t ac_state[size];
-                for (int i = 0; i < size; i++)
-                  ac_state[i] = stateArray[i].as<uint8_t>();
-                irsend.send(irProtocol, ac_state, size);
-                indicateIRSent(); // <--- ADD THIS
-              }
-              else if (doc["code"])
-              {
-                const char *codeStr = doc["code"];
-                uint16_t bits = doc["bits"] ? doc["bits"].as<uint16_t>() : 32;
-                uint64_t irCode = strtoull(codeStr, NULL, 16);
-                irsend.send(irProtocol, irCode, bits);
-                indicateIRSent(); // <--- ADD THIS
-              }
-            }
+            Serial.println("\n[GSM] Message Received.");
+            processJSON(doc);
           }
           else
           {
@@ -1496,19 +1407,54 @@ void healthLoop()
       sensorSerial.end();
       delay(200);
       sensorSerial.begin(256000, SERIAL_8N1, RX_PIN, TX_PIN);
-      delay(750);
-      if (sensor.begin())
+      
+      Serial.println("[HEALTH] Waiting for radar UART heartbeat...");
+      unsigned long startWait = millis();
+      bool radarAlive = false;
+
+      // Active Listening: Wait up to 5s for the radar to wake back up
+      while (millis() - startWait < 5000)
       {
-        sensor.enhancedMode();
-        sensorReady = true;
-        radarStaleAlerted = false;
-        lastRadarDataTime = millis();
-        publishHealthAlert("radar_recovered", "Re-init succeeded");
+        esp_task_wdt_reset(); 
+        handleButton(); // <--- Keep the physical button responsive during recovery
+        
+        if (sensorSerial.available())
+        {
+          radarAlive = true;
+          break;
+        }
+        delay(10);
+      }
+
+      if (radarAlive)
+      {
+        while(sensorSerial.available()) sensorSerial.read(); // Clear garbage bytes
+        
+        if (sensor.begin())
+        {
+          sensor.enhancedMode();
+          sensorReady = true;
+          radarStaleAlerted = false;
+          lastRadarDataTime = millis();
+          publishHealthAlert("radar_recovered", "Re-init succeeded");
+          Serial.println("[HEALTH] Radar re-init SUCCESS.");
+        }
+        else
+        {
+          radarStaleAlerted = true;
+          publishHealthAlert("radar_stale", "UART active, protocol failed");
+          Serial.println("[HEALTH] Radar re-init FAILED (Protocol error).");
+        }
       }
       else
       {
         radarStaleAlerted = true;
-        publishHealthAlert("radar_stale", "No data >30s, re-init failed");
+        publishHealthAlert("radar_dead", "No UART heartbeat after 5s");
+        Serial.println("[HEALTH] Radar re-init FAILED (No hardware response).");
+        
+        // OPTIONAL: If you want the ESP32 to completely reboot itself when 
+        // the radar dies during runtime, you can uncomment the line below.
+        // ESP.restart(); 
       }
     }
   }
@@ -1715,6 +1661,266 @@ void trackPresenceTime()
 }
 
 // ====================================================================
+// ========================= LOCAL SCHEDULER ==========================
+// ====================================================================
+
+// Set system POSIX clock from GSM modem AT+CCLK (enables getLocalTime in GSM mode).
+void setSystemTimeFromGSM()
+{
+  String response = sendAT("AT+CCLK?", 2000);
+  int first = response.indexOf('"');
+  int last  = response.lastIndexOf('"');
+  if (first == -1 || last == -1) return;
+  String t = response.substring(first + 1, last);
+  if (t.length() < 17) return;
+  struct tm timeinfo = {};
+  timeinfo.tm_year  = t.substring(0, 2).toInt() + 100;
+  timeinfo.tm_mon   = t.substring(3, 5).toInt() - 1;
+  timeinfo.tm_mday  = t.substring(6, 8).toInt();
+  timeinfo.tm_hour  = t.substring(9, 11).toInt();
+  timeinfo.tm_min   = t.substring(12, 14).toInt();
+  timeinfo.tm_sec   = t.substring(15, 17).toInt();
+  time_t utc        = mktime(&timeinfo);
+  utc              += (gmtOffset_sec); // apply same offset as NTP path
+  struct timeval tv = {utc, 0};
+  settimeofday(&tv, nullptr);
+  Serial.println("[SCHED] System clock synced from GSM modem.");
+}
+
+// "monday" -> 1, "sunday" -> 0, etc.  Returns -1 on unknown input.
+int dayNameToWday(const String &day)
+{
+  String d = day;
+  d.toLowerCase();
+  if (d == "sunday")    return 0;
+  if (d == "monday")    return 1;
+  if (d == "tuesday")   return 2;
+  if (d == "wednesday") return 3;
+  if (d == "thursday")  return 4;
+  if (d == "friday")    return 5;
+  if (d == "saturday")  return 6;
+  return -1;
+}
+
+// Persist one day's schedule to NVS.
+void saveSchedule(int wday, const uint8_t slots[24],
+                  uint8_t radarSetting, const String &irHex, int irTemp)
+{
+  char key[13];
+  snprintf(key, sizeof(key), "sch_h_%d", wday);
+  preferences.putBytes(key, slots, 24);
+
+  snprintf(key, sizeof(key), "sch_r_%d", wday);
+  preferences.putUChar(key, radarSetting); // 0=unset, 1=enable, 2=disable
+
+  snprintf(key, sizeof(key), "sch_ir_%d", wday);
+  preferences.putString(key, irHex);
+
+  snprintf(key, sizeof(key), "sch_irt_%d", wday);
+  preferences.putInt(key, irTemp);
+}
+
+// Send the schedule-specific raw IR code for this day if temp matches.
+// Returns false if not stored or temp doesn't match — caller falls through to normal IR path.
+bool sendScheduleIR(int wday, int targetTemp)
+{
+  char key[13];
+  snprintf(key, sizeof(key), "sch_irt_%d", wday);
+  int storedTemp = preferences.getInt(key, -1);
+  if (storedTemp != targetTemp) return false;
+
+  snprintf(key, sizeof(key), "sch_ir_%d", wday);
+  String irHex = preferences.getString(key, "");
+  if (irHex.length() == 0) return false;
+
+  String proto = preferences.getString("protocol_name", "");
+  if (proto.length() == 0) return false;
+
+  decode_type_t protocol = strToDecodeType(proto.c_str());
+  if (protocol == decode_type_t::UNKNOWN) return false;
+
+  uint64_t code = strtoull(irHex.c_str(), NULL, 16);
+  irsend.send(protocol, code, 32);
+  Serial.printf("[SCHED] Schedule IR sent: 0x%s at %d°C\n", irHex.c_str(), targetTemp);
+  return true;
+}
+
+// Apply today's schedule radar setting — skipped entirely if manual override is active.
+void applyScheduleRadar(int wday)
+{
+  if (radarManualOverride) return;
+
+  char key[13];
+  snprintf(key, sizeof(key), "sch_r_%d", wday);
+  uint8_t setting = preferences.getUChar(key, 0);
+
+  if (setting == 1 && !radarAutoMode)
+  {
+    radarAutoMode = true;
+    lastPresenceTime = millis();
+    preferences.putBool("radar_auto", true);
+    Serial.println("[SCHED] Schedule enabled radar automation.");
+  }
+  else if (setting == 2 && radarAutoMode)
+  {
+    radarAutoMode = false;
+    preferences.putBool("radar_auto", false);
+    Serial.println("[SCHED] Schedule disabled radar automation.");
+  }
+}
+
+// Parse and store a schedule command received via MQTT.
+void handleScheduleCommand(JsonDocument &doc)
+{
+  const char *day = doc["day"];
+  if (!day)
+  {
+    Serial.println("[SCHED] Missing 'day' field, ignoring.");
+    return;
+  }
+
+  int wday = dayNameToWday(String(day));
+  if (wday < 0)
+  {
+    Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day);
+    return;
+  }
+
+  JsonArray hoursArray = doc["hours"].as<JsonArray>();
+  if (!hoursArray || hoursArray.size() != 24)
+  {
+    Serial.println("[SCHED] 'hours' must be an array of exactly 24 elements, ignoring.");
+    return;
+  }
+
+  uint8_t slots[24];
+  for (int i = 0; i < 24; i++)
+  {
+    JsonVariant v = hoursArray[i];
+    if (v.is<const char *>())
+    {
+      slots[i] = 0; // "off" string -> 0
+    }
+    else
+    {
+      int t = v.as<int>();
+      slots[i] = (t >= 16 && t <= 32) ? (uint8_t)t : 0; // clamp out-of-range to off
+    }
+  }
+
+  // Parse radar: accept "0100"/"256" (enable), "0200"/"512"/"off" (disable), absent (unset).
+  uint8_t radarSetting = 0;
+  if (doc["radar"])
+  {
+    String r = doc["radar"].as<String>();
+    if      (r == "0100" || r == "256")               radarSetting = 1;
+    else if (r == "0200" || r == "512" || r == "off") radarSetting = 2;
+  }
+
+  String irHex  = doc["ir"]                  | "";
+  int    irTemp = doc["temperature_setting"] | 0;
+
+  saveSchedule(wday, slots, radarSetting, irHex, irTemp);
+
+  // New schedule is authoritative — clear any manual override and apply radar immediately.
+  radarManualOverride = false;
+  preferences.putBool("rad_ovr", false);
+
+  if (radarSetting == 1)
+  {
+    radarAutoMode = true;
+    lastPresenceTime = millis();
+    preferences.putBool("radar_auto", true);
+    Serial.println("[SCHED] Schedule applied: radar ENABLED.");
+  }
+  else if (radarSetting == 2)
+  {
+    radarAutoMode = false;
+    preferences.putBool("radar_auto", false);
+    Serial.println("[SCHED] Schedule applied: radar DISABLED.");
+  }
+
+  // Update global automation params if supplied (same as normal command path).
+  if (doc["temperature_setting"])
+  {
+    currentNormalTemp = doc["temperature_setting"].as<int>();
+    preferences.putInt("normal_temp", currentNormalTemp);
+  }
+  if (doc["eco"])
+  {
+    TEcoTemp = doc["eco"].as<int>();
+    preferences.putInt("eco_temp", TEcoTemp);
+  }
+  if (doc["teco"])
+  {
+    TEcoTime = doc["teco"].as<unsigned long>() * 60000;
+    preferences.putULong("eco_time", TEcoTime);
+  }
+  if (doc["toff"])
+  {
+    TOffTime = doc["toff"].as<unsigned long>() * 60000;
+    if (TOffTime <= TEcoTime)
+    {
+      TOffTime = TEcoTime + 60000;
+      Serial.println("[SCHED] WARNING: TOffTime <= TEcoTime, auto-corrected.");
+    }
+    preferences.putULong("off_time", TOffTime);
+  }
+
+  Serial.printf("[SCHED] Schedule saved for %s (wday=%d). Radar setting: %d\n", day, wday, radarSetting);
+  indicateSuccess();
+}
+
+// Called every loop iteration. Fires the scheduled slot once per hour change.
+void scheduleLoop()
+{
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return; // No valid time yet — skip silently.
+
+  int currentHour = timeinfo.tm_hour;
+  int currentWday = timeinfo.tm_wday; // 0=Sun, 1=Mon, ..., 6=Sat
+
+  if (currentHour == lastScheduledHour) return; // Already fired this hour.
+  lastScheduledHour = currentHour;
+
+  char key[13];
+  snprintf(key, sizeof(key), "sch_h_%d", currentWday);
+  if (preferences.getBytesLength(key) != 24) return; // No schedule saved for today.
+
+  uint8_t slots[24];
+  preferences.getBytes(key, slots, 24);
+  uint8_t slotTemp = slots[currentHour];
+
+  applyScheduleRadar(currentWday); // Radar first — before the IR command.
+
+  if (slotTemp == 0)
+  {
+    Serial.printf("[SCHED] %02d:00 -> scheduled OFF\n", currentHour);
+    if (!playCustomButton("ir_off"))
+      sendACFallback(false, 24);
+    acAutoState = AUTO_OFF;
+    indicateIRSent();
+  }
+  else
+  {
+    int targetTemp = (int)slotTemp;
+    currentNormalTemp = targetTemp;
+    preferences.putInt("normal_temp", currentNormalTemp);
+
+    Serial.printf("[SCHED] %02d:00 -> scheduled %d°C\n", currentHour, targetTemp);
+
+    if (!sendScheduleIR(currentWday, targetTemp))
+    {
+      String customKey = "ir_" + String(targetTemp);
+      if (!playCustomButton(customKey.c_str()))
+        sendACFallback(true, targetTemp);
+    }
+    acAutoState = AUTO_ON_NORMAL;
+    indicateIRSent();
+  }
+}
+
+// ====================================================================
 // ========================= MAIN SETUP ===============================
 // ====================================================================
 
@@ -1739,8 +1945,11 @@ void setup()
   TOffTime = preferences.getULong("off_time", 300000);
   currentNormalTemp = preferences.getInt("normal_temp", 24);
 
-  // ---> ADD THIS LINE <---
-  radarAutoMode = preferences.getBool("radar_auto", false);
+  radarAutoMode       = preferences.getBool("radar_auto", false);
+  radarManualOverride = preferences.getBool("rad_ovr",   false);
+  radarManualValue    = preferences.getBool("rad_ovr_v", false);
+  lastScheduledHour   = -1;    // force scheduleLoop() to fire on first valid tick after boot
+  lastPresenceTime    = millis(); // defensive: prevents emptyDuration from being huge if acAutoState guard is ever removed
 
   Serial.printf("\n[BOOT] Loaded Automation Settings:\n - Eco Temp: %d°C\n - Eco Time: %lu ms\n - Off Time: %lu ms\n", TEcoTemp, TEcoTime, TOffTime);
 
@@ -1778,21 +1987,51 @@ void setup()
   }
 
   // Initialize Radar
-  delay(750); // Brief delay to ensure stable startup before we read data
   sensorSerial.begin(256000, SERIAL_8N1, RX_PIN, TX_PIN);
-  delay(750); // Give the radar time to boot up before we start talking to it
-  if (sensor.begin())
+  Serial.print("Waiting for LD2410 UART heartbeat (up to 5s)");
+  
+  unsigned long startWait = millis();
+  bool radarAlive = false;
+
+  // Listen for actual data on the RX line
+  while (millis() - startWait < 5000)
   {
-    sensorReady = true;
-    sensor.enhancedMode();
-    delay(750); // Brief delay to ensure stable startup before we read data
-    Serial.println("LD2410 Radar initialized successfully.");
+    esp_task_wdt_reset(); // Keep watchdog happy during the wait
+    
+    if (sensorSerial.available())
+    {
+      radarAlive = true;
+      break;
+    }
+    
+    if ((millis() - startWait) % 500 == 0) Serial.print("."); // Print dots every 500ms
+    delay(10); 
+  }
+  Serial.println();
+
+  if (radarAlive)
+  {
+    // Drain any garbage bytes from the hardware boot sequence
+    while(sensorSerial.available()) sensorSerial.read(); 
+    
+    if (sensor.begin())
+    {
+      sensorReady = true;
+      sensor.enhancedMode();
+      Serial.println("✓ LD2410 Radar initialized successfully.");
+    }
+    else
+    {
+      radarInitFailed = true;
+      Serial.println("⚠ Warning: Radar UART active, but begin() sequence failed.");
+    }
   }
   else
   {
-    radarInitFailed = true;
-    Serial.println("Warning: Radar failed to initialize.");
-    // ESP.restart(); // Restarting in case of radar init failure, as it's critical for the device's main functionality
+    Serial.println("✗ FATAL ERROR: No UART data from Radar after 5 seconds!");
+    Serial.println("Rebooting ESP32 to attempt hardware recovery...");
+    delay(1000);
+    ESP.restart();
   }
 
   // ac.begin();
@@ -2110,6 +2349,7 @@ void setup()
         Serial.println("\n============= SETUP COMPLETE =============");
         Serial.println("✓ MQTT connected & subscribed!");
         currentSysState = SYS_GSM_OK;
+        setSystemTimeFromGSM(); // sync POSIX clock so scheduleLoop() works in GSM mode
 
         // One-time GSM boot alert — mirrors the WiFi reconnect() boot alert
         JsonDocument bootDoc;
@@ -2167,6 +2407,7 @@ void loop()
   automationLoop();
   trackPresenceTime();
   healthLoop();
+  scheduleLoop();
 
   // 3. DASHBOARD MODE (Web Server takes over entirely)
   if (isAPMode)
@@ -2204,6 +2445,7 @@ void loop()
           WiFi.disconnect();
           WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
           smartDelay(2000); // Replaced standard delay
+          abc = 0;
         }
       }
       Serial.println("\nWiFi Reconnected!");

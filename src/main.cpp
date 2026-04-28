@@ -175,7 +175,8 @@ void calibrateRadarReset();
 void scheduleLoop();
 void handleScheduleCommand(JsonDocument &doc);
 void setSystemTimeFromGSM();
-void processJSON(JsonDocument &doc);
+bool processJSON(JsonDocument &doc);
+void sendAck();
 
 // ===== Non-Blocking Delay for Responsiveness =====
 // Replaces standard delay() in blocking loops so the button always works.
@@ -1099,18 +1100,14 @@ void sendACFallback(bool turnOn, int targetTemp)
   ac.sendAc();
 }
 
-// ====================================================================
-// ==================== UNIFIED JSON COMMAND PARSER ===================
-// ====================================================================
-// Single source of truth for all MQTT commands.
-// Called by both callback() (WiFi) and checkIncomingData() (GSM).
-void processJSON(JsonDocument &doc)
+bool processJSON(JsonDocument &doc)
 {
-  // Schedule command: "command" + "hours" array → store and return early.
+  bool isValidCommand = false;
+
   if (doc["command"] == "temperature_control" && doc["hours"])
   {
     handleScheduleCommand(doc);
-    return;
+    return true; 
   }
 
   if (doc["radar"])
@@ -1139,11 +1136,12 @@ void processJSON(JsonDocument &doc)
         indicateSuccess();
       }
     }
-    // Standalone radar → mark as manual override so schedule can't revert it.
     radarManualOverride = true;
     radarManualValue    = radarAutoMode;
     preferences.putBool("rad_ovr",   true);
     preferences.putBool("rad_ovr_v", radarAutoMode);
+    
+    isValidCommand = true;
   }
 
   if (doc["temperature_setting"])
@@ -1151,6 +1149,7 @@ void processJSON(JsonDocument &doc)
     currentNormalTemp = doc["temperature_setting"].as<int>();
     preferences.putInt("normal_temp", currentNormalTemp);
     Serial.printf("Updated Normal Temp: %d°C\n", currentNormalTemp);
+    isValidCommand = true;
   }
 
   if (doc["eco"])
@@ -1158,6 +1157,7 @@ void processJSON(JsonDocument &doc)
     TEcoTemp = doc["eco"].as<int>();
     preferences.putInt("eco_temp", TEcoTemp);
     Serial.printf("Updated TEcoTemp: %d°C\n", TEcoTemp);
+    isValidCommand = true;
   }
 
   if (doc["teco"])
@@ -1165,6 +1165,7 @@ void processJSON(JsonDocument &doc)
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
     preferences.putULong("eco_time", TEcoTime);
     Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
+    isValidCommand = true;
   }
 
   if (doc["toff"])
@@ -1177,6 +1178,7 @@ void processJSON(JsonDocument &doc)
     }
     preferences.putULong("off_time", TOffTime);
     Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
+    isValidCommand = true;
   }
 
   if (doc["ir"])
@@ -1209,33 +1211,40 @@ void processJSON(JsonDocument &doc)
     {
       Serial.println("ERROR: IR command code out of range.");
     }
+    isValidCommand = true;
   }
 
   if (doc["protocol"])
   {
     const char *protoStr = doc["protocol"];
     decode_type_t irProtocol = strToDecodeType(protoStr);
-    if (irProtocol == decode_type_t::UNKNOWN) return;
-
-    if (doc["state"])
+    if (irProtocol != decode_type_t::UNKNOWN)
     {
-      JsonArray stateArray = doc["state"].as<JsonArray>();
-      uint16_t size = doc["size"] ? doc["size"].as<uint16_t>() : stateArray.size();
-      if (size > 256) { Serial.println("Error: AC state array too large"); return; }
-      uint8_t ac_state[size];
-      for (int i = 0; i < size; i++) ac_state[i] = stateArray[i].as<uint8_t>();
-      irsend.send(irProtocol, ac_state, size);
-      indicateIRSent();
-    }
-    else if (doc["code"])
-    {
-      const char *codeStr = doc["code"];
-      uint16_t bits = doc["bits"] ? doc["bits"].as<uint16_t>() : 32;
-      uint64_t irCode = strtoull(codeStr, NULL, 16);
-      irsend.send(irProtocol, irCode, bits);
-      indicateIRSent();
+      if (doc["state"])
+      {
+        JsonArray stateArray = doc["state"].as<JsonArray>();
+        uint16_t size = doc["size"] ? doc["size"].as<uint16_t>() : stateArray.size();
+        if (size <= 256)
+        {
+          uint8_t ac_state[size];
+          for (int i = 0; i < size; i++) ac_state[i] = stateArray[i].as<uint8_t>();
+          irsend.send(irProtocol, ac_state, size);
+          indicateIRSent();
+        }
+      }
+      else if (doc["code"])
+      {
+        const char *codeStr = doc["code"];
+        uint16_t bits = doc["bits"] ? doc["bits"].as<uint16_t>() : 32;
+        uint64_t irCode = strtoull(codeStr, NULL, 16);
+        irsend.send(irProtocol, irCode, bits);
+        indicateIRSent();
+      }
+      isValidCommand = true;
     }
   }
+
+  return isValidCommand;
 }
 
 void callback(char *topic, byte *payload, unsigned int length)
@@ -1248,7 +1257,10 @@ void callback(char *topic, byte *payload, unsigned int length)
   DeserializationError error = deserializeJson(doc, payload, length);
   if (error) { Serial.println("JSON Parse Failed"); return; }
 
-  processJSON(doc);
+  // ONLY send an ack if a valid command was executed
+  if (processJSON(doc)) {
+    sendAck();
+  }
 }
 
 void setup_wifi()
@@ -1383,7 +1395,11 @@ void checkIncomingData()
           if (!deserializeJson(doc, jsonStr))
           {
             Serial.println("\n[GSM] Message Received.");
-            processJSON(doc);
+            
+            // ONLY send an ack if a valid command was executed
+            if (processJSON(doc)) {
+              sendAck();
+            }
           }
           else
           {
@@ -1501,6 +1517,28 @@ void sendAutomationEvent(String eventCode)
 }
 
 int batteryPercentage() { return 80; }
+
+// Sends a minimal {"id":{"ack":"ok"}} to whichever transport is active.
+// Uses a stack buffer — zero heap allocation.
+void sendAck()
+{
+  char buf[80];
+  const String &id = switch_gsm_wifi ? device_id : gsmClientId;
+  snprintf(buf, sizeof(buf), "{\"%s\":{\"ack\":\"ok\"}}", id.c_str());
+
+  if (switch_gsm_wifi) {
+    if (client.connected())
+      client.publish(mqttTopic.c_str(), buf);
+  } else {
+    String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
+    String resp = sendAT(cmd, 3000);
+    if (resp.indexOf(">") != -1) {
+      SerialAT.print(buf);
+      SerialAT.write(0x1A);
+    }
+  }
+  Serial.println("[ACK] Sent.");
+}
 
 void sensorLoop()
 {
@@ -2198,6 +2236,7 @@ void setup()
   }
 
   // Initialize Radar
+  sensorSerial.setRxBufferSize(512); // doubles the default 256-byte HW FIFO; persists across end()/begin()
   sensorSerial.begin(256000, SERIAL_8N1, RX_PIN, TX_PIN);
   Serial.print("Waiting for LD2410 UART heartbeat (up to 5s)");
   

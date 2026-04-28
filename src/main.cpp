@@ -110,6 +110,7 @@ String currentPassword = "";
 // ===== Web Dashboard Admin Credentials =====
 const char *www_username = "admin";
 const char *www_password = "admin";
+const char *dev_password = "dev1234";
 
 // ===== SoftAP Setup =====
 const char *AP_SSID = "SmartAC-Setup";
@@ -219,179 +220,319 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AC Controller Dashboard</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClimateIQ Setup</title>
 <style>
-  :root { --bg: #0f1724; --card: #111827; --text: #f8fafc; --acc: #3b82f6; --ok: #10b981; --err: #ef4444; --wait: #eab308; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; margin: 0; }
-  .dashboard-grid { display: grid; grid-template-columns: 300px 1fr 280px; gap: 20px; max-width: 1200px; margin: 0 auto; }
-  .card { background: var(--card); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.2); border: 1px solid #1f2937; }
-  .card h3 { margin-top: 0; border-bottom: 1px solid #1f2937; padding-bottom: 10px; color: #94a3b8; font-size: 1.1rem; }
-  .status-panel { background: #000; padding: 15px; border-radius: 8px; border: 1px solid #334155; font-family: monospace; }
-  .status-row { margin-bottom: 12px; border-bottom: 1px dashed #334155; padding-bottom: 8px; }
-  .status-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
-  .status-label { font-size: 0.85rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-  .badge { background: #1f2937; padding: 4px 10px; border-radius: 6px; display: inline-block; font-size: 0.9rem; margin: 2px; color: white; }
-  .badge.yellow { background: var(--wait); color: #000; font-weight: bold; }
-  .badge.green { background: var(--ok); color: white; font-weight: bold; }
-  .badge.red { background: var(--err); color: white; font-weight: bold; }
-  #action-log { color: var(--ok); margin-top: 5px; font-size: 0.95rem; }
-  button { width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px; font-weight: 600; font-size: 1rem; cursor: pointer; transition: 0.2s; color: white; }
-  button:active { transform: scale(0.98); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-primary { background: var(--acc); }
-  .btn-purple { background: #6366f1; }
-  .btn-danger { background: var(--err); }
-  .btn-warn { background: #d97706; }
-  .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  @media (max-width: 900px) { .dashboard-grid { grid-template-columns: 1fr; } }
+  :root{--bg:#0f1724;--card:#111827;--text:#f8fafc;--acc:#3b82f6;--ok:#10b981;--err:#ef4444;--wait:#eab308;}
+  *{box-sizing:border-box;}
+  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:0;}
+  .hdr{background:var(--card);border-bottom:2px solid #1e3a5f;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;}
+  .hdr-title{font-size:1.15rem;font-weight:700;color:var(--acc);letter-spacing:1px;}
+  .hdr-sub{font-size:0.75rem;color:#64748b;margin-top:2px;}
+  .wrap{padding:20px;}
+  .grid{display:grid;grid-template-columns:300px 1fr 280px;gap:18px;max-width:1200px;margin:0 auto;}
+  .card{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 4px 12px rgba(0,0,0,0.25);border:1px solid #1f2937;}
+  .card h3{margin-top:0;border-bottom:1px solid #1f2937;padding-bottom:10px;color:#64748b;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.8px;}
+  .sp{background:#000;padding:14px;border-radius:8px;border:1px solid #334155;font-family:monospace;}
+  .sr{margin-bottom:11px;border-bottom:1px dashed #1e293b;padding-bottom:8px;}
+  .sr:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
+  .sl{font-size:0.72rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;}
+  .badge{background:#1f2937;padding:4px 10px;border-radius:6px;display:inline-block;font-size:0.82rem;margin:2px;color:white;}
+  .badge.yellow{background:var(--wait);color:#000;font-weight:bold;}
+  .badge.green{background:var(--ok);color:white;font-weight:bold;}
+  .badge.red{background:var(--err);color:white;font-weight:bold;}
+  #alog{color:var(--ok);margin-top:5px;font-size:0.88rem;min-height:1.2em;}
+  button{width:100%;padding:11px;margin-bottom:8px;border:none;border-radius:8px;font-weight:600;font-size:0.9rem;cursor:pointer;transition:opacity .15s;color:white;}
+  button:last-child{margin-bottom:0;}
+  button:active{opacity:.72;}
+  button:disabled{opacity:.4;cursor:not-allowed;}
+  .btn-p{background:var(--acc);}
+  .btn-v{background:#6366f1;}
+  .btn-d{background:var(--err);}
+  .btn-w{background:#d97706;}
+  .btn-t{background:#0d9488;}
+  .btn-g2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .btn-g2 button{margin-bottom:0;}
+  select,input[type=text],input[type=password]{width:100%;padding:10px;margin-bottom:12px;border-radius:6px;border:1px solid #334155;background:#1f2937;color:white;font-size:0.9rem;outline:none;}
+  select:focus,input:focus{border-color:var(--acc);}
+  .sw{margin:8px 0;}
+  .sl2{display:flex;justify-content:space-between;font-size:0.75rem;color:#94a3b8;margin-bottom:3px;}
+  .stk{background:#1f2937;border-radius:4px;height:20px;overflow:hidden;}
+  .sf{height:100%;border-radius:4px;transition:width .35s ease;width:0%;}
+  .sf.mv{background:linear-gradient(90deg,#2563eb,#60a5fa);}
+  .sf.sx{background:linear-gradient(90deg,#7c3aed,#a78bfa);}
+  .mbg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;align-items:center;justify-content:center;}
+  .mbox{background:var(--card);border-radius:14px;padding:28px;width:320px;border:1px solid #334155;}
+  .mbox h3{margin:0 0 12px;color:var(--acc);font-size:1.05rem;}
+  .dpw{max-width:1200px;margin:18px auto 0;display:none;}
+  .dhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:0 2px;}
+  .dhdr h2{margin:0;color:var(--acc);font-size:1.05rem;font-weight:700;}
+  .dclose{background:var(--err);border:none;color:white;padding:7px 18px;border-radius:7px;cursor:pointer;font-weight:600;width:auto;margin:0;font-size:0.85rem;}
+  .dgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;}
+  .pr{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #1f2937;}
+  .pr:last-child{border-bottom:none;}
+  .pn{font-size:0.85rem;color:var(--text);font-weight:500;}
+  .ps{font-size:0.7rem;color:#475569;margin-top:2px;}
+  .pi{background:#1f2937;border:1px solid #334155;border-radius:6px;padding:6px 8px;color:white;width:72px;text-align:center;font-size:0.88rem;outline:none;}
+  .pi:focus{border-color:var(--acc);}
+  .pu{font-size:0.75rem;color:#64748b;margin-left:4px;}
+  .dr{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #1f2937;font-size:0.85rem;}
+  .dr:last-child{border-bottom:none;}
+  .dk{color:#64748b;}
+  .dv{color:var(--text);font-family:monospace;font-size:0.82rem;}
+  @media(max-width:900px){.grid,.dgrid{grid-template-columns:1fr;}}
 </style>
 <script>
-  function setUIState(stateText, colorClass) {
-    const el = document.getElementById('sys-mode');
-    el.innerText = stateText; el.className = "badge " + colorClass;
+function sui(t,c){const e=document.getElementById('sm');e.innerText=t;e.className='badge '+c;}
+async function refresh(idle){
+  if(idle!==false)sui('System Ready','green');
+  try{
+    const d=await(await fetch('/status')).json();
+    document.getElementById('spro').innerText=d.protocol||'None Detected';
+    if(document.getElementById('sms'))document.getElementById('sms').value=d.mode;
+    const wb=document.getElementById('swf');
+    if(d.has_credentials){wb.innerText='Saved in Memory';wb.className='badge green';}
+    else{wb.innerText='Missing / Empty';wb.className='badge yellow';}
+    const kd=document.getElementById('sk');
+    kd.innerHTML=d.keys.length>0?d.keys.map(k=>'<span class="badge">'+k+'</span>').join(''):'<span style="color:#64748b;">No Buttons Saved</span>';
+  }catch(e){sui('Disconnected','red');}
+}
+async function doAct(a,ep){
+  const lg=document.getElementById('alog');
+  document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  sui('Listening...','yellow');
+  lg.innerText='> Point remote & press '+a;lg.style.color='var(--wait)';
+  try{
+    const res=await fetch(ep);const txt=await res.text();
+    lg.innerText='> '+txt;
+    if(res.ok){lg.style.color='var(--ok)';sui('Success','green');}
+    else{lg.style.color='var(--err)';sui('Failed','red');}
+  }catch(e){lg.innerText='> Network Error!';lg.style.color='var(--err)';sui('Error','red');}
+  document.querySelectorAll('button').forEach(b=>b.disabled=false);refresh(false);
+  setTimeout(()=>{sui('System Ready','green');lg.innerText='> Ready';lg.style.color='var(--ok)';},3000);
+}
+async function saveSt(){
+  const m=document.getElementById('sms').value;
+  const s=document.getElementById('ns').value;
+  const p=document.getElementById('np').value;
+  if(m==='wifi'&&!s)return alert('SSID cannot be empty for WiFi mode');
+  if(confirm('Save settings and reboot device?')){
+    await fetch('/setwifi?mode='+m+'&ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p),{method:'POST'});
+    alert('Saved! Device is rebooting.');
   }
-  async function refreshStatus(isIdle = true) {
-    if(isIdle) setUIState("System Ready", "green");
-    try {
-      const res = await fetch('/status'); const data = await res.json();
-      document.getElementById('sys-protocol').innerText = data.protocol || "None Detected";
-      // ---> NEW: Set the dropdown to current mode <---
-      if(document.getElementById('sys-mode-select')) {
-        document.getElementById('sys-mode-select').value = data.mode;
-      }
-      // NEW: Update the WiFi status badge
-      const wifiBadge = document.getElementById('sys-wifi-status');
-      if (data.has_credentials) {
-        wifiBadge.innerText = "Saved in Memory";
-        wifiBadge.className = "badge green";
-      } else {
-        wifiBadge.innerText = "Missing / Empty";
-        wifiBadge.className = "badge yellow";
-      }
-      const keysDiv = document.getElementById('sys-keys');
-      if (data.keys.length > 0) { keysDiv.innerHTML = data.keys.map(k => `<span class="badge">${k}</span>`).join(''); } 
-      else { keysDiv.innerHTML = "<span style='color: #64748b;'>No Buttons Saved</span>"; }
-    } catch(e) { setUIState("Disconnected", "red"); }
+}
+async function doCal(ep){
+  const lg=document.getElementById('alog');
+  document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  sui('Calibrating...','yellow');
+  lg.innerText=ep.includes('auto')?'> EMPTY the room — calibration takes up to 120s...':'> Sending factory reset to radar...';
+  lg.style.color='var(--wait)';
+  try{
+    const res=await fetch(ep);const txt=await res.text();
+    lg.innerText='> '+txt;
+    if(res.ok){lg.style.color='var(--ok)';sui('Done','green');}
+    else{lg.style.color='var(--err)';sui('Failed','red');}
+  }catch(e){lg.innerText='> Network Error!';lg.style.color='var(--err)';sui('Error','red');}
+  document.querySelectorAll('button').forEach(b=>b.disabled=false);
+  setTimeout(()=>{sui('System Ready','green');lg.innerText='> Ready';lg.style.color='var(--ok)';},5000);
+}
+var dpt=null;
+function openDM(){document.getElementById('dm').style.display='flex';setTimeout(()=>document.getElementById('dpi').focus(),50);document.getElementById('de').style.display='none';}
+function closeDM(){document.getElementById('dm').style.display='none';document.getElementById('dpi').value='';}
+function dpk(e){if(e.key==='Enter')chkDP();}
+async function chkDP(){
+  var p=document.getElementById('dpi').value;
+  try{
+    var d=await(await fetch('/devauth?pass='+encodeURIComponent(p))).json();
+    if(d.ok){closeDM();openDP();}else{document.getElementById('de').style.display='block';}
+  }catch(e){document.getElementById('de').style.display='block';}
+}
+function openDP(){
+  document.getElementById('dpanel').style.display='block';
+  pollD();dpt=setInterval(pollD,1000);
+  setTimeout(()=>document.getElementById('dpanel').scrollIntoView({behavior:'smooth'}),100);
+}
+function closeDP(){
+  document.getElementById('dpanel').style.display='none';
+  if(dpt){clearInterval(dpt);dpt=null;}
+}
+function buildGates(cid,arr,isMv){
+  var clr=isMv?'linear-gradient(90deg,#2563eb,#60a5fa)':'linear-gradient(90deg,#7c3aed,#a78bfa)';
+  var h='';
+  for(var i=0;i<arr.length;i++){
+    var v=arr[i],p=Math.min(v,100);
+    h+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px;">'
+      +'<span style="font-family:monospace;font-size:0.68rem;color:#64748b;width:16px;flex-shrink:0;">G'+i+'</span>'
+      +'<div style="flex:1;background:#0f172a;border-radius:3px;height:13px;overflow:hidden;">'
+        +'<div style="width:'+p+'%;height:100%;background:'+clr+';border-radius:3px;transition:width .35s;"></div>'
+      +'</div>'
+      +'<span style="font-family:monospace;font-size:0.7rem;color:var(--text);width:24px;text-align:right;">'+v+'</span>'
+    +'</div>';
   }
-  async function doAction(action, endpoint, btn) {
-    const actionLog = document.getElementById('action-log');
-    const allBtns = document.querySelectorAll('button');
-    allBtns.forEach(b => b.disabled = true);
-    setUIState("Listening...", "yellow");
-    actionLog.innerText = '> Point remote & press ' + action; actionLog.style.color = 'var(--wait)';
-    try {
-      const res = await fetch(endpoint); const text = await res.text();
-      actionLog.innerText = '> ' + text;
-      if(res.ok) { actionLog.style.color = 'var(--ok)'; setUIState("Success", "green"); } 
-      else { actionLog.style.color = 'var(--err)'; setUIState("Failed", "red"); }
-    } catch (e) {
-      actionLog.innerText = '> Network Error!'; actionLog.style.color = 'var(--err)'; setUIState("Error", "red");
-    }
-    allBtns.forEach(b => b.disabled = false); refreshStatus(false);
-    setTimeout(() => { setUIState("System Ready", "green"); actionLog.innerText = '> Ready'; actionLog.style.color = 'var(--ok)'; }, 3000);
-  }
-  async function saveSettings() {
-    const mode = document.getElementById('sys-mode-select').value;
-    const s = document.getElementById('new-ssid').value;
-    const p = document.getElementById('new-pass').value;
-    
-    if(mode === 'wifi' && !s) return alert('SSID cannot be empty for WiFi mode');
-    
-    if(confirm('Save settings and reboot device?')) {
-      const url = `/setwifi?mode=${mode}&ssid=${encodeURIComponent(s)}&pass=${encodeURIComponent(p)}`;
-      await fetch(url, { method: 'POST' });
-      alert('Saved! Device is rebooting.');
-    }
-  }
-  window.onload = refreshStatus;
-  // Calibration uses a separate helper so the action-log message is appropriate.
-  async function doCalibrate(endpoint, btn) {
-    const actionLog = document.getElementById('action-log');
-    const allBtns = document.querySelectorAll('button');
-    allBtns.forEach(b => b.disabled = true);
-    setUIState("Calibrating...", "yellow");
-    const isAuto = endpoint.includes('auto');
-    actionLog.innerText = isAuto
-      ? '> EMPTY the room now — calibration takes up to 120s...'
-      : '> Sending factory reset to radar...';
-    actionLog.style.color = 'var(--wait)';
-    try {
-      const res = await fetch(endpoint);
-      const text = await res.text();
-      actionLog.innerText = '> ' + text;
-      if(res.ok) { actionLog.style.color = 'var(--ok)'; setUIState("Done", "green"); }
-      else { actionLog.style.color = 'var(--err)'; setUIState("Failed", "red"); }
-    } catch(e) {
-      actionLog.innerText = '> Network Error!'; actionLog.style.color = 'var(--err)'; setUIState("Error", "red");
-    }
-    allBtns.forEach(b => b.disabled = false);
-    setTimeout(() => { setUIState("System Ready", "green"); actionLog.innerText = '> Ready'; actionLog.style.color = 'var(--ok)'; }, 5000);
-  }
+  document.getElementById(cid).innerHTML=h;
+}
+async function pollD(){
+  try{
+    var d=await(await fetch('/devdata')).json();
+    if(d.mv&&d.mv.length)buildGates('mv-gates',d.mv,true);
+    if(d.sx&&d.sx.length)buildGates('st-gates',d.sx,false);
+    var pr=document.getElementById('dpres');
+    pr.innerText=d.presence?'DETECTED':'EMPTY';
+    pr.className='badge '+(d.presence?'green':'red');
+    var ids=['inp-nt','inp-et','inp-etime','inp-otime'];
+    var vals=[d.normal_temp,d.eco_temp,d.eco_time_min,d.off_time_min];
+    for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(el&&document.activeElement!==el)el.value=vals[i];}
+    var u=d.uptime_s,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
+    document.getElementById('dvh').innerText=(d.free_heap/1024).toFixed(1)+' KB';
+    document.getElementById('dvu').innerText=h+'h '+m+'m '+s+'s';
+    document.getElementById('dvr').innerText=d.radar_ready?'OK':'ERROR';
+    document.getElementById('dvhdc').innerText=d.hdc_ok?'OK':'FAULT';
+    document.getElementById('dva').innerText=d.radar_auto?'Enabled':'Disabled';
+  }catch(e){}
+}
+async function saveDP(){
+  var n=document.getElementById('inp-nt').value;
+  var e=document.getElementById('inp-et').value;
+  var et=document.getElementById('inp-etime').value;
+  var ot=document.getElementById('inp-otime').value;
+  if(parseInt(ot)<=parseInt(et))return alert('Off Time must be greater than Eco Time!');
+  var res=await fetch('/setparams?normal_temp='+n+'&eco_temp='+e+'&eco_time='+et+'&off_time='+ot,{method:'POST'});
+  alert(await res.text());
+}
+window.onload=function(){refresh();};
 </script>
 </head>
 <body>
-  <div class="dashboard-grid">
-    <div class="card">
-      <h3>System Overview</h3>
-      <div class="status-panel">
-        <div class="status-row"><div class="status-label">Current State</div><div id="sys-mode" class="badge green">Loading...</div><div id="action-log">> Ready</div></div>
-        <div class="status-row">
-        <div class="status-label">WiFi Credentials</div>
-        <div id="sys-wifi-status" class="badge">Checking...</div>
-        </div>
-        <div class="status-row"><div class="status-label">AC Protocol</div><div id="sys-protocol" style="color: var(--acc); font-size: 1.1rem; font-weight: bold;">Loading...</div></div>
-        <div class="status-row" style="border: none;"><div class="status-label">Saved Commands</div><div id="sys-keys">Loading...</div></div>
-      </div>
-    </div>
-    <div class="card">
-      <h3>IR Learning Center</h3>
-      <button class="btn-primary" style="margin-bottom: 20px; padding: 15px;" onclick="doAction('ANY Button', '/learn/protocol', this)">Detect AC Protocol</button>
-      <div style="font-size: 0.85rem; color: #64748b; margin-bottom: 10px; text-transform: uppercase;">Custom Buttons</div>
-      <div class="btn-grid">
-        <button class="btn-purple" onclick="doAction('ON', '/learn/on', this)">Learn ON</button>
-        <button class="btn-purple" onclick="doAction('OFF', '/learn/off', this)">Learn OFF</button>
-        <button class="btn-purple" style="background: #8b5cf6;" onclick="doAction('24°C', '/learn/24', this)">Learn 24 °C</button>
-        <button class="btn-purple" style="background: #8b5cf6;" onclick="doAction('26°C', '/learn/26', this)">Learn 26 °C</button>
-        <button class="btn-purple" style="background: #a855f7;" onclick="doAction('28°C', '/learn/28', this)">Learn 28 °C</button>
-        <button class="btn-purple" style="background: #a855f7;" onclick="doAction('30°C', '/learn/30', this)">Learn 30 °C</button>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Network Settings</h3>
-      <div style="margin-top: 15px;">
-        <div style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 5px;">SYSTEM MODE</div>
-        <select id="sys-mode-select" style="width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 15px; border-radius: 6px; border: 1px solid #334155; background: #1f2937; color: white;">
-          <option value="wifi">WiFi Mode</option>
-          <option value="gsm">GSM Mode</option>
-        </select>
+<div class="hdr">
+  <div>
+    <div class="hdr-title">ClimateIQ Controller</div>
+    <div class="hdr-sub">AP Configuration Mode</div>
+  </div>
+  <div id="sm" class="badge green">Loading...</div>
+</div>
+<div class="wrap">
+<div class="grid">
 
-        <div style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 5px;">WIFI SSID</div>
-        <input type="text" id="new-ssid" placeholder="Enter Router Name" style="width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 15px; border-radius: 6px; border: 1px solid #334155; background: #1f2937; color: white;">
-        
-        <div style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 5px;">WIFI PASSWORD</div>
-        <input type="password" id="new-pass" placeholder="Enter Password" style="width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 15px; border-radius: 6px; border: 1px solid #334155; background: #1f2937; color: white;">
-        
-        <button class="btn-warn" onclick="saveSettings()">Save & Reboot</button>
-      </div>
-    </div>
-    <div class="card">
-      <h3>System Admin</h3>
-      <div style="margin-top: 15px;">
-        <button class="btn-danger" onclick="if(confirm('Wipe all saved IR data?')) doAction('Reset', '/reset', this)">Reset Memory</button>
-        <button class="btn-warn" onclick="window.location.href='/update'">OTA Update</button>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Radar Calibration</h3>
-      <p style="font-size:0.85rem; color:#94a3b8; margin-top:0;">
-        <b>Auto-Calibrate:</b> Room must be completely empty. The sensor learns the ambient noise floor and sets thresholds automatically (firmware &ge; 2.44). Takes up to 120 seconds.<br><br>
-        <b>Factory Reset:</b> Wipes learned thresholds and restores HLK defaults. Use this if Auto-Calibrate produces false triggers.
-      </p>
-      <button class="btn-primary" onclick="if(confirm('EMPTY the room first. Calibration will take up to 120s. Continue?')) doCalibrate('/calibrate/auto', this)">Auto-Calibrate (Recommended)</button>
-      <button class="btn-warn" onclick="if(confirm('Reset radar to factory defaults?')) doCalibrate('/calibrate/reset', this)">Factory Reset Radar</button>
+  <div class="card">
+    <h3>System Overview</h3>
+    <div class="sp">
+      <div class="sr"><div class="sl">Status</div><div id="alog">&gt; Ready</div></div>
+      <div class="sr"><div class="sl">WiFi Credentials</div><div id="swf" class="badge">Checking...</div></div>
+      <div class="sr"><div class="sl">AC Protocol</div><div id="spro" style="color:var(--acc);font-size:1.0rem;font-weight:bold;">Loading...</div></div>
+      <div class="sr" style="border:none;"><div class="sl">Saved Buttons</div><div id="sk">Loading...</div></div>
     </div>
   </div>
+
+  <div class="card">
+    <h3>IR Learning Center</h3>
+    <button class="btn-p" style="margin-bottom:16px;padding:14px;" onclick="doAct('ANY Button','/learn/protocol')">Detect AC Protocol</button>
+    <div style="font-size:0.72rem;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">Custom Buttons</div>
+    <div class="btn-g2">
+      <button class="btn-v" onclick="doAct('ON','/learn/on')">Learn ON</button>
+      <button class="btn-v" onclick="doAct('OFF','/learn/off')">Learn OFF</button>
+      <button class="btn-v" style="background:#7c3aed;" onclick="doAct('24C','/learn/24')">Learn 24&#176;C</button>
+      <button class="btn-v" style="background:#7c3aed;" onclick="doAct('26C','/learn/26')">Learn 26&#176;C</button>
+      <button class="btn-v" style="background:#5b21b6;" onclick="doAct('28C','/learn/28')">Learn 28&#176;C</button>
+      <button class="btn-v" style="background:#5b21b6;" onclick="doAct('30C','/learn/30')">Learn 30&#176;C</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Network Settings</h3>
+    <div class="sl" style="margin-bottom:4px;">System Mode</div>
+    <select id="sms"><option value="wifi">WiFi Mode</option><option value="gsm">GSM Mode</option></select>
+    <div class="sl" style="margin-bottom:4px;">WiFi SSID</div>
+    <input type="text" id="ns" placeholder="Enter Router Name">
+    <div class="sl" style="margin-bottom:4px;">WiFi Password</div>
+    <input type="password" id="np" placeholder="Enter Password" style="margin-bottom:0;">
+    <button class="btn-w" style="margin-top:12px;" onclick="saveSt()">Save &amp; Reboot</button>
+  </div>
+
+  <div class="card">
+    <h3>System Admin</h3>
+    <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doAct('Reset','/reset')">Reset IR Memory</button>
+    <button class="btn-w" onclick="window.location.href='/update'">OTA Firmware Update</button>
+    <button class="btn-t" onclick="openDM()">Developer Mode</button>
+  </div>
+
+  <div class="card">
+    <h3>Radar Calibration</h3>
+    <p style="font-size:0.82rem;color:#94a3b8;margin-top:0;line-height:1.6;">
+      <b style="color:var(--text);">Auto-Calibrate:</b> Room must be completely empty. Sensor learns ambient noise floor and sets thresholds automatically (firmware &ge; 2.44). Up to 120 seconds.<br><br>
+      <b style="color:var(--text);">Factory Reset:</b> Wipes learned thresholds back to HLK defaults. Use if auto-calibrate produces false triggers.
+    </p>
+    <button class="btn-p" onclick="if(confirm('EMPTY the room first. Continue?'))doCal('/calibrate/auto')">Auto-Calibrate (Recommended)</button>
+    <button class="btn-w" onclick="if(confirm('Reset radar to factory defaults?'))doCal('/calibrate/reset')">Factory Reset Radar</button>
+  </div>
+
+</div>
+
+<div class="dpw" id="dpanel">
+  <div class="dhdr">
+    <h2>&#128295; Developer Mode</h2>
+    <button class="dclose" onclick="closeDP()">&#128274; Lock &amp; Close</button>
+  </div>
+  <div class="dgrid">
+    <div class="card">
+      <h3>Radar Live Feed</h3>
+      <div style="margin-bottom:14px;">
+        <div class="sl">Presence</div>
+        <div id="dpres" class="badge red">EMPTY</div>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="sl" style="margin-bottom:5px;">Moving Energy (per gate)</div>
+        <div id="mv-gates"><span style="color:#475569;font-size:0.8rem;">Waiting for data...</span></div>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="sl" style="margin-bottom:5px;">Stationary Energy (per gate)</div>
+        <div id="st-gates"><span style="color:#475569;font-size:0.8rem;">Waiting for data...</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Automation Parameters</h3>
+      <div class="pr">
+        <div><div class="pn">Normal Temp</div><div class="ps">AC ON set point</div></div>
+        <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-nt" min="16" max="32" value="24"><span class="pu">&#176;C</span></div>
+      </div>
+      <div class="pr">
+        <div><div class="pn">Eco Temp</div><div class="ps">Raised when room is empty</div></div>
+        <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-et" min="16" max="32" value="26"><span class="pu">&#176;C</span></div>
+      </div>
+      <div class="pr">
+        <div><div class="pn">Eco Delay</div><div class="ps">Minutes before eco mode</div></div>
+        <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-etime" min="1" max="120" value="2"><span class="pu">min</span></div>
+      </div>
+      <div class="pr" style="border:none;">
+        <div><div class="pn">Off Delay</div><div class="ps">Minutes before AC turns off</div></div>
+        <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-otime" min="2" max="240" value="5"><span class="pu">min</span></div>
+      </div>
+      <button class="btn-p" style="margin-top:14px;" onclick="saveDP()">Save Parameters</button>
+    </div>
+    <div class="card">
+      <h3>System Diagnostics</h3>
+      <div class="dr"><span class="dk">Free Heap</span><span class="dv" id="dvh">&#8212;</span></div>
+      <div class="dr"><span class="dk">Uptime</span><span class="dv" id="dvu">&#8212;</span></div>
+      <div class="dr"><span class="dk">Radar Sensor</span><span class="dv" id="dvr">&#8212;</span></div>
+      <div class="dr"><span class="dk">HDC1080 Sensor</span><span class="dv" id="dvhdc">&#8212;</span></div>
+      <div class="dr"><span class="dk">Radar Auto Mode</span><span class="dv" id="dva">&#8212;</span></div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<div class="mbg" id="dm">
+  <div class="mbox">
+    <h3>&#128295; Developer Access</h3>
+    <div style="font-size:0.82rem;color:#94a3b8;margin-bottom:14px;">Enter the developer password to unlock advanced settings and live radar diagnostics.</div>
+    <input type="password" id="dpi" placeholder="Developer password" onkeydown="dpk(event)" style="margin-bottom:6px;">
+    <div id="de" style="display:none;color:var(--err);font-size:0.82rem;margin-bottom:8px;">&#10007; Incorrect password. Try again.</div>
+    <button class="btn-p" onclick="chkDP()">Unlock</button>
+    <button class="btn-d" onclick="closeDM()" style="margin-top:6px;">Cancel</button>
+  </div>
+</div>
+
 </body>
 </html>
 )rawliteral";
@@ -734,6 +875,76 @@ void setupWebServer()
 
   server.on("/calibrate/auto",  HTTP_GET, []() { calibrateRadarAuto(); });
   server.on("/calibrate/reset", HTTP_GET, []() { calibrateRadarReset(); });
+
+  server.on("/devauth", HTTP_GET, []() {
+    String pass = server.hasArg("pass") ? server.arg("pass") : "";
+    JsonDocument doc;
+    doc["ok"] = (pass == String(dev_password));
+    String json;
+    serializeJson(doc, json);
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/devdata", HTTP_GET, []() {
+    JsonDocument doc;
+    if (sensorReady) {
+      const MyLD2410::ValuesArray& mvSig = sensor.getMovingSignals();
+      const MyLD2410::ValuesArray& stSig = sensor.getStationarySignals();
+      JsonArray mvArr = doc["mv"].to<JsonArray>();
+      JsonArray stArr = doc["sx"].to<JsonArray>();
+      for (int i = 0; i <= mvSig.N; i++) mvArr.add((int)mvSig.values[i]);
+      for (int i = 0; i <= stSig.N; i++) stArr.add((int)stSig.values[i]);
+    } else {
+      doc["mv"].to<JsonArray>();
+      doc["sx"].to<JsonArray>();
+    }
+    doc["presence"]     = cachedPresence;
+    doc["radar_ready"]  = sensorReady;
+    doc["radar_auto"]   = radarAutoMode;
+    doc["normal_temp"]  = currentNormalTemp;
+    doc["eco_temp"]     = TEcoTemp;
+    doc["eco_time_min"] = (int)(TEcoTime / 60000);
+    doc["off_time_min"] = (int)(TOffTime / 60000);
+    doc["free_heap"]    = (int)ESP.getFreeHeap();
+    doc["uptime_s"]     = (int)(millis() / 1000);
+    doc["hdc_ok"]       = !hdcInitFailed;
+    String json;
+    serializeJson(doc, json);
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/setparams", HTTP_POST, []() {
+    bool changed = false;
+    if (server.hasArg("normal_temp")) {
+      currentNormalTemp = constrain(server.arg("normal_temp").toInt(), 16, 32);
+      preferences.putInt("normal_temp", currentNormalTemp);
+      changed = true;
+    }
+    if (server.hasArg("eco_temp")) {
+      TEcoTemp = constrain(server.arg("eco_temp").toInt(), 16, 32);
+      preferences.putInt("eco_temp", TEcoTemp);
+      changed = true;
+    }
+    if (server.hasArg("eco_time")) {
+      TEcoTime = (unsigned long)constrain(server.arg("eco_time").toInt(), 1, 120) * 60000;
+      preferences.putULong("eco_time", TEcoTime);
+      changed = true;
+    }
+    if (server.hasArg("off_time")) {
+      unsigned long newOff = (unsigned long)constrain(server.arg("off_time").toInt(), 2, 240) * 60000;
+      if (newOff <= TEcoTime) newOff = TEcoTime + 60000;
+      TOffTime = newOff;
+      preferences.putULong("off_time", TOffTime);
+      changed = true;
+    }
+    if (changed) {
+      Serial.printf("[DEV] Params saved — Normal:%d°C Eco:%d°C TEco:%lums TOff:%lums\n",
+        currentNormalTemp, TEcoTemp, TEcoTime, TOffTime);
+      server.send(200, "text/plain", "Parameters saved successfully.");
+    } else {
+      server.send(400, "text/plain", "No valid parameters provided.");
+    }
+  });
 
   server.on("/update", HTTP_GET, []()
             { server.send(200, "text/html", "<form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Upload'></form>"); });

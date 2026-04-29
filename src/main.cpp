@@ -71,7 +71,19 @@ AutoState acAutoState = AUTO_OFF;
 // ===== Local Scheduler =====
 bool radarManualOverride = false; // true = standalone radar cmd won; schedule radar blocked
 bool radarManualValue    = false;
-int  lastScheduledHour   = -1;   // edge-trigger: fires once per hour change
+int  lastScheduledMin    = -1;   // edge-trigger: -1 = boot (force immediate evaluation)
+int  lastScheduledWday   = -1;   // actual weekday of the last scheduler evaluation
+
+struct ScheduleSegment {
+  uint16_t startMin; // minutes from midnight (0-1439)
+  uint16_t endMin;   // minutes from midnight (1-1440, exclusive; 1440 = end of day)
+  uint8_t  temp;     // target temperature (16-32)
+  uint8_t  radar;    // 0=unset, 1=enable, 2=disable (per-segment)
+  uint8_t  eco;      // eco temp override, 0 = inherit global
+  uint8_t  teco;     // eco time minutes override, 0 = inherit global
+  uint8_t  toff;     // off time minutes override, 0 = inherit global
+}; // 9 bytes per segment
+#define MAX_SEGS_PER_DAY 7
 
 // ===== System Mode Flag =====
 bool switch_gsm_wifi; // Will be set dynamically from memory
@@ -175,8 +187,15 @@ void calibrateRadarReset();
 void scheduleLoop();
 void handleScheduleCommand(JsonDocument &doc);
 void setSystemTimeFromGSM();
+uint8_t loadSegmentCount(int wday);
+bool    loadSegment(int wday, int idx, ScheduleSegment &out);
+int     findSegmentTemp(int wday, int minute);
 bool processJSON(JsonDocument &doc);
-void sendAck();
+void publishACK(const char *action, const char *detail);
+void applySegmentRadar(uint8_t radarSetting);
+void applySegmentParams(const ScheduleSegment &seg);
+bool findSegment(int wday, int minute, ScheduleSegment &out);
+bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b);
 
 // ===== Non-Blocking Delay for Responsiveness =====
 // Replaces standard delay() in blocking loops so the button always works.
@@ -1104,16 +1123,17 @@ bool processJSON(JsonDocument &doc)
 {
   bool isValidCommand = false;
 
-  if (doc["command"] == "temperature_control" && doc["hours"])
+  if (doc["command"] == "temperature_control" && doc["segments"])
   {
-    handleScheduleCommand(doc);
-    return true; 
+    handleScheduleCommand(doc); // publishACK("schedule_saved", day) called inside
+    return true;
   }
 
   if (doc["radar"])
   {
     String radarStr = doc["radar"].as<String>();
     Serial.println("Received Radar Value: " + radarStr);
+    const char *detail = "unchanged";
 
     if (radarStr == "0100" || radarStr == "256")
     {
@@ -1125,6 +1145,7 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: ENABLED");
         indicateSuccess();
       }
+      detail = "enabled";
     }
     else if (radarStr == "0200" || radarStr == "512")
     {
@@ -1135,12 +1156,13 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: DISABLED");
         indicateSuccess();
       }
+      detail = "disabled";
     }
     radarManualOverride = true;
     radarManualValue    = radarAutoMode;
     preferences.putBool("rad_ovr",   true);
     preferences.putBool("rad_ovr_v", radarAutoMode);
-    
+    publishACK("radar", detail);
     isValidCommand = true;
   }
 
@@ -1149,6 +1171,8 @@ bool processJSON(JsonDocument &doc)
     currentNormalTemp = doc["temperature_setting"].as<int>();
     preferences.putInt("normal_temp", currentNormalTemp);
     Serial.printf("Updated Normal Temp: %d°C\n", currentNormalTemp);
+    char detail[32]; snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
+    publishACK("temperature_setting", detail);
     isValidCommand = true;
   }
 
@@ -1157,6 +1181,8 @@ bool processJSON(JsonDocument &doc)
     TEcoTemp = doc["eco"].as<int>();
     preferences.putInt("eco_temp", TEcoTemp);
     Serial.printf("Updated TEcoTemp: %d°C\n", TEcoTemp);
+    char detail[32]; snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
+    publishACK("eco", detail);
     isValidCommand = true;
   }
 
@@ -1165,6 +1191,8 @@ bool processJSON(JsonDocument &doc)
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
     preferences.putULong("eco_time", TEcoTime);
     Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
+    char detail[32]; snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
+    publishACK("teco", detail);
     isValidCommand = true;
   }
 
@@ -1178,6 +1206,8 @@ bool processJSON(JsonDocument &doc)
     }
     preferences.putULong("off_time", TOffTime);
     Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
+    char detail[32]; snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
+    publishACK("toff", detail);
     isValidCommand = true;
   }
 
@@ -1185,18 +1215,21 @@ bool processJSON(JsonDocument &doc)
   {
     int cmdNum = doc["ir"].as<int>();
     Serial.printf("Received IR Command Code: %d\n", cmdNum);
+    char detail[32];
 
     if (cmdNum == 1)
     {
       if (!playCustomButton("ir_on")) sendACFallback(true, 24);
       indicateIRSent();
       acAutoState = AUTO_ON_NORMAL;
+      snprintf(detail, sizeof(detail), "ir_on");
     }
     else if (cmdNum == 2)
     {
       if (!playCustomButton("ir_off")) sendACFallback(false, 24);
       indicateIRSent();
       acAutoState = AUTO_OFF;
+      snprintf(detail, sizeof(detail), "ir_off");
     }
     else if (cmdNum >= 3 && cmdNum <= 17)
     {
@@ -1206,11 +1239,14 @@ bool processJSON(JsonDocument &doc)
       if (!playCustomButton(customKey.c_str())) sendACFallback(true, targetTemp);
       indicateIRSent();
       acAutoState = AUTO_ON_NORMAL;
+      snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
     }
     else
     {
       Serial.println("ERROR: IR command code out of range.");
+      snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
     }
+    publishACK("ir", detail);
     isValidCommand = true;
   }
 
@@ -1240,6 +1276,7 @@ bool processJSON(JsonDocument &doc)
         irsend.send(irProtocol, irCode, bits);
         indicateIRSent();
       }
+      publishACK("protocol_ir", protoStr);
       isValidCommand = true;
     }
   }
@@ -1258,9 +1295,7 @@ void callback(char *topic, byte *payload, unsigned int length)
   if (error) { Serial.println("JSON Parse Failed"); return; }
 
   // ONLY send an ack if a valid command was executed
-  if (processJSON(doc)) {
-    sendAck();
-  }
+  processJSON(doc);
 }
 
 void setup_wifi()
@@ -1397,9 +1432,7 @@ void checkIncomingData()
             Serial.println("\n[GSM] Message Received.");
             
             // ONLY send an ack if a valid command was executed
-            if (processJSON(doc)) {
-              sendAck();
-            }
+            processJSON(doc);
           }
           else
           {
@@ -1518,13 +1551,17 @@ void sendAutomationEvent(String eventCode)
 
 int batteryPercentage() { return 80; }
 
-// Sends a minimal {"id":{"ack":"ok"}} to whichever transport is active.
-// Uses a stack buffer — zero heap allocation.
-void sendAck()
+// Sends {"id":{"ack":"ok","action":"...","detail":"..."}} via WiFi MQTT or GSM.
+void publishACK(const char *action, const char *detail)
 {
-  char buf[80];
-  const String &id = switch_gsm_wifi ? device_id : gsmClientId;
-  snprintf(buf, sizeof(buf), "{\"%s\":{\"ack\":\"ok\"}}", id.c_str());
+  JsonDocument doc;
+  String id = switch_gsm_wifi ? device_id : gsmClientId;
+  JsonObject obj = doc[id].to<JsonObject>();
+  obj["ack"]    = "ok";
+  obj["action"] = action;
+  obj["detail"] = detail;
+  char buf[256];
+  serializeJson(doc, buf);
 
   if (switch_gsm_wifi) {
     if (client.connected())
@@ -1537,7 +1574,7 @@ void sendAck()
       SerialAT.write(0x1A);
     }
   }
-  Serial.println("[ACK] Sent.");
+  Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
 }
 
 void sensorLoop()
@@ -1951,20 +1988,97 @@ int dayNameToWday(const String &day)
   return -1;
 }
 
-// Persist one day's schedule to NVS.
-void saveSchedule(int wday, const uint8_t slots[24],
-                  uint8_t radarSetting, const String &irHex, int irTemp)
+// ---- NVS helpers for segment-based schedule ----
+
+uint8_t loadSegmentCount(int wday)
 {
   char key[13];
-  snprintf(key, sizeof(key), "sch_h_%d", wday);
-  preferences.putBytes(key, slots, 24);
+  snprintf(key, sizeof(key), "sch_cnt_%d", wday);
+  return preferences.getUChar(key, 0);
+}
 
-  snprintf(key, sizeof(key), "sch_r_%d", wday);
-  preferences.putUChar(key, radarSetting); // 0=unset, 1=enable, 2=disable
+bool loadSegment(int wday, int idx, ScheduleSegment &out)
+{
+  char key[13];
+  snprintf(key, sizeof(key), "sch_seg_%d", wday);
+  size_t len = preferences.getBytesLength(key);
+  if (len < (size_t)((idx + 1) * 9)) return false;
+  uint8_t buf[MAX_SEGS_PER_DAY * 9];
+  preferences.getBytes(key, buf, len);
+  int o        = idx * 9;
+  out.startMin = (uint16_t)(buf[o]     | (buf[o + 1] << 8));
+  out.endMin   = (uint16_t)(buf[o + 2] | (buf[o + 3] << 8));
+  out.temp     = buf[o + 4];
+  out.radar    = buf[o + 5];
+  out.eco      = buf[o + 6];
+  out.teco     = buf[o + 7];
+  out.toff     = buf[o + 8];
+  return true;
+}
+
+// Returns the target temp (16-32) if 'minute' falls inside a segment, else 0.
+int findSegmentTemp(int wday, int minute)
+{
+  uint8_t count = loadSegmentCount(wday);
+  for (uint8_t i = 0; i < count; i++)
+  {
+    ScheduleSegment seg;
+    if (!loadSegment(wday, i, seg)) continue;
+    if (minute >= (int)seg.startMin && minute < (int)seg.endMin) return seg.temp;
+  }
+  return 0;
+}
+
+// Returns true and populates 'out' if 'minute' is inside any segment for 'wday'.
+bool findSegment(int wday, int minute, ScheduleSegment &out)
+{
+  uint8_t count = loadSegmentCount(wday);
+  for (uint8_t i = 0; i < count; i++)
+  {
+    if (!loadSegment(wday, i, out)) continue;
+    if (minute >= (int)out.startMin && minute < (int)out.endMin) return true;
+  }
+  return false;
+}
+
+bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b)
+{
+  return a.startMin == b.startMin &&
+         a.endMin   == b.endMin   &&
+         a.temp     == b.temp     &&
+         a.radar    == b.radar    &&
+         a.eco      == b.eco      &&
+         a.teco     == b.teco     &&
+         a.toff     == b.toff;
+}
+
+// Persist one day's segment schedule to NVS (9 bytes per segment).
+void saveSchedule(int wday, const ScheduleSegment segs[], uint8_t count,
+                  const String &irHex, int irTemp)
+{
+  char key[13];
+
+  uint8_t buf[MAX_SEGS_PER_DAY * 9];
+  for (uint8_t i = 0; i < count; i++)
+  {
+    int o    = i * 9;
+    buf[o]   = segs[i].startMin & 0xFF;
+    buf[o+1] = (segs[i].startMin >> 8) & 0xFF;
+    buf[o+2] = segs[i].endMin & 0xFF;
+    buf[o+3] = (segs[i].endMin >> 8) & 0xFF;
+    buf[o+4] = segs[i].temp;
+    buf[o+5] = segs[i].radar;
+    buf[o+6] = segs[i].eco;
+    buf[o+7] = segs[i].teco;
+    buf[o+8] = segs[i].toff;
+  }
+  snprintf(key, sizeof(key), "sch_cnt_%d", wday);
+  preferences.putUChar(key, count);
+  snprintf(key, sizeof(key), "sch_seg_%d", wday);
+  preferences.putBytes(key, buf, count * 9);
 
   snprintf(key, sizeof(key), "sch_ir_%d", wday);
   preferences.putString(key, irHex);
-
   snprintf(key, sizeof(key), "sch_irt_%d", wday);
   preferences.putInt(key, irTemp);
 }
@@ -1982,6 +2096,42 @@ bool sendScheduleIR(int wday, int targetTemp)
   String irHex = preferences.getString(key, "");
   if (irHex.length() == 0) return false;
 
+  // Dashboard schedule payloads may send the same 4-digit command codes used by
+  // live control messages (e.g. "0011" => cmd 11 => 24C) instead of a raw hex IR frame.
+  bool digitsOnly = true;
+  for (size_t i = 0; i < irHex.length(); i++)
+  {
+    if (!isDigit((unsigned char)irHex[i]))
+    {
+      digitsOnly = false;
+      break;
+    }
+  }
+  if (digitsOnly && irHex.length() <= 4)
+  {
+    int cmdNum = irHex.toInt();
+    if (cmdNum >= 1 && cmdNum <= 17)
+    {
+      if (cmdNum == 1)
+      {
+        if (!playCustomButton("ir_on")) sendACFallback(true, targetTemp);
+      }
+      else if (cmdNum == 2)
+      {
+        if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+      }
+      else
+      {
+        int cmdTemp = cmdNum + 13;
+        String customKey = "ir_" + String(cmdTemp);
+        if (!playCustomButton(customKey.c_str())) sendACFallback(true, cmdTemp);
+      }
+      Serial.printf("[SCHED] Dashboard IR command %s sent for %dC schedule.\n",
+                    irHex.c_str(), targetTemp);
+      return true;
+    }
+  }
+
   String proto = preferences.getString("protocol_name", "");
   if (proto.length() == 0) return false;
 
@@ -1994,27 +2144,45 @@ bool sendScheduleIR(int wday, int targetTemp)
   return true;
 }
 
-// Apply today's schedule radar setting — skipped entirely if manual override is active.
-void applyScheduleRadar(int wday)
+// Apply a segment's radar setting. Skipped if manual override is active or setting is unset.
+void applySegmentRadar(uint8_t radarSetting)
 {
   if (radarManualOverride) return;
+  if (radarSetting == 0) return; // unset — leave radar mode as-is
 
-  char key[13];
-  snprintf(key, sizeof(key), "sch_r_%d", wday);
-  uint8_t setting = preferences.getUChar(key, 0);
-
-  if (setting == 1 && !radarAutoMode)
+  if (radarSetting == 1 && !radarAutoMode)
   {
     radarAutoMode = true;
     lastPresenceTime = millis();
     preferences.putBool("radar_auto", true);
-    Serial.println("[SCHED] Schedule enabled radar automation.");
+    Serial.println("[SCHED] Segment enabled radar automation.");
   }
-  else if (setting == 2 && radarAutoMode)
+  else if (radarSetting == 2 && radarAutoMode)
   {
     radarAutoMode = false;
     preferences.putBool("radar_auto", false);
-    Serial.println("[SCHED] Schedule disabled radar automation.");
+    Serial.println("[SCHED] Segment disabled radar automation.");
+  }
+}
+
+// Apply a segment's eco/teco/toff overrides to global automation params (0 = inherit, skip).
+void applySegmentParams(const ScheduleSegment &seg)
+{
+  if (seg.eco > 0)
+  {
+    TEcoTemp = seg.eco;
+    preferences.putInt("eco_temp", TEcoTemp);
+  }
+  if (seg.teco > 0)
+  {
+    TEcoTime = (unsigned long)seg.teco * 60000UL;
+    preferences.putULong("eco_time", TEcoTime);
+  }
+  if (seg.toff > 0)
+  {
+    TOffTime = (unsigned long)seg.toff * 60000UL;
+    if (TOffTime <= TEcoTime) { TOffTime = TEcoTime + 60000UL; Serial.println("[SCHED] TOffTime auto-corrected."); }
+    preferences.putULong("off_time", TOffTime);
   }
 }
 
@@ -2022,157 +2190,233 @@ void applyScheduleRadar(int wday)
 void handleScheduleCommand(JsonDocument &doc)
 {
   const char *day = doc["day"];
-  if (!day)
-  {
-    Serial.println("[SCHED] Missing 'day' field, ignoring.");
-    return;
-  }
+  if (!day) { Serial.println("[SCHED] Missing 'day', ignoring."); return; }
 
   int wday = dayNameToWday(String(day));
-  if (wday < 0)
+  if (wday < 0) { Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day); return; }
+
+  JsonArray segsArray = doc["segments"].as<JsonArray>();
+  if (!segsArray || segsArray.size() == 0)
   {
-    Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day);
+    Serial.println("[SCHED] Missing or empty 'segments' array, ignoring.");
     return;
   }
 
-  JsonArray hoursArray = doc["hours"].as<JsonArray>();
-  if (!hoursArray || hoursArray.size() != 24)
+  ScheduleSegment segs[MAX_SEGS_PER_DAY];
+  uint8_t count = 0;
+
+  for (JsonVariant v : segsArray)
   {
-    Serial.println("[SCHED] 'hours' must be an array of exactly 24 elements, ignoring.");
-    return;
+    if (count >= MAX_SEGS_PER_DAY)
+    {
+      Serial.printf("[SCHED] WARNING: More than %d segments — truncating.\n", MAX_SEGS_PER_DAY);
+      break;
+    }
+    int start = v["start"] | -1;
+    int end   = v["end"]   | -1;
+    int temp  = v["temp"]  | 0;
+
+    if (start < 0 || start > 1439 || end <= start)
+    {
+      Serial.printf("[SCHED] Segment {start:%d, end:%d} invalid, skipping.\n", start, end);
+      continue;
+    }
+    if (end > 1440) end = 1440; // clamp: 1440 means "through end of day"
+    if (temp < 16 || temp > 32)
+    {
+      Serial.printf("[SCHED] Temp %d out of range [16-32], skipping segment.\n", temp);
+      continue;
+    }
+
+    // Per-segment radar: "0100"/"256"/"on" = enable, "0200"/"512"/"off" = disable, absent = 0 (unset).
+    uint8_t segRadar = 0;
+    if (v["radar"])
+    {
+      String r = v["radar"].as<String>();
+      if      (r == "0100" || r == "256" || r == "on")  segRadar = 1;
+      else if (r == "0200" || r == "512" || r == "off") segRadar = 2;
+    }
+
+    uint8_t segEco  = (uint8_t)(v["eco"]  | 0);
+    uint8_t segTeco = (uint8_t)(v["teco"] | 0);
+    uint8_t segToff = (uint8_t)(v["toff"] | 0);
+
+    segs[count++] = {(uint16_t)start, (uint16_t)end, (uint8_t)temp, segRadar, segEco, segTeco, segToff};
   }
 
-  uint8_t slots[24];
-  for (int i = 0; i < 24; i++)
+  if (count == 0) { Serial.println("[SCHED] No valid segments found, ignoring."); return; }
+
+  // Sort by startMin (insertion sort — small array).
+  for (int i = 1; i < count; i++)
   {
-    JsonVariant v = hoursArray[i];
-    if (v.is<const char *>())
-    {
-      slots[i] = 0; // "off" string -> 0
-    }
-    else
-    {
-      int t = v.as<int>();
-      slots[i] = (t >= 16 && t <= 32) ? (uint8_t)t : 0; // clamp out-of-range to off
-    }
+    ScheduleSegment tmp = segs[i];
+    int j = i - 1;
+    while (j >= 0 && segs[j].startMin > tmp.startMin) { segs[j + 1] = segs[j]; j--; }
+    segs[j + 1] = tmp;
   }
 
-  // Parse radar: accept "0100"/"256" (enable), "0200"/"512"/"off" (disable), absent (unset).
-  uint8_t radarSetting = 0;
-  if (doc["radar"])
+  // Reject overlapping segments (after sort, adjacent ends must not exceed next start).
+  for (int i = 0; i < count - 1; i++)
   {
-    String r = doc["radar"].as<String>();
-    if      (r == "0100" || r == "256")               radarSetting = 1;
-    else if (r == "0200" || r == "512" || r == "off") radarSetting = 2;
+    if (segs[i].endMin > segs[i + 1].startMin)
+    {
+      Serial.println("[SCHED] ERROR: Overlapping segments detected — schedule rejected.");
+      return;
+    }
   }
 
   String irHex  = doc["ir"]                  | "";
   int    irTemp = doc["temperature_setting"] | 0;
 
-  saveSchedule(wday, slots, radarSetting, irHex, irTemp);
+  saveSchedule(wday, segs, count, irHex, irTemp);
 
-  // New schedule is authoritative — clear any manual override and apply radar immediately.
+  // New schedule is authoritative — clear manual radar override.
+  // Radar will be applied per-segment when scheduleLoop() next fires.
   radarManualOverride = false;
   preferences.putBool("rad_ovr", false);
 
-  if (radarSetting == 1)
+  // Only force immediate re-evaluation if this schedule is for today.
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo) && timeinfo.tm_wday == wday)
   {
-    radarAutoMode = true;
-    lastPresenceTime = millis();
-    preferences.putBool("radar_auto", true);
-    Serial.println("[SCHED] Schedule applied: radar ENABLED.");
-  }
-  else if (radarSetting == 2)
-  {
-    radarAutoMode = false;
-    preferences.putBool("radar_auto", false);
-    Serial.println("[SCHED] Schedule applied: radar DISABLED.");
+    lastScheduledMin = -1;
+    lastScheduledWday = -1;
   }
 
-  // Update global automation params if supplied (same as normal command path).
-  if (doc["temperature_setting"])
-  {
-    currentNormalTemp = doc["temperature_setting"].as<int>();
-    preferences.putInt("normal_temp", currentNormalTemp);
-  }
-  if (doc["eco"])
-  {
-    TEcoTemp = doc["eco"].as<int>();
-    preferences.putInt("eco_temp", TEcoTemp);
-  }
-  if (doc["teco"])
-  {
-    TEcoTime = doc["teco"].as<unsigned long>() * 60000;
-    preferences.putULong("eco_time", TEcoTime);
-  }
-  if (doc["toff"])
-  {
-    TOffTime = doc["toff"].as<unsigned long>() * 60000;
-    if (TOffTime <= TEcoTime)
-    {
-      TOffTime = TEcoTime + 60000;
-      Serial.println("[SCHED] WARNING: TOffTime <= TEcoTime, auto-corrected.");
-    }
-    preferences.putULong("off_time", TOffTime);
-  }
-
-  Serial.printf("[SCHED] Schedule saved for %s (wday=%d). Radar setting: %d\n", day, wday, radarSetting);
+  Serial.printf("[SCHED] %d segment(s) saved for %s (wday=%d)\n", count, day, wday);
   indicateSuccess();
+  publishACK("schedule_saved", day);
 }
 
-// Called every loop iteration. Fires the scheduled slot once per hour change.
+// Called every loop iteration. Fires at segment boundaries (minute resolution).
+// On boot (lastScheduledMin == -1): restores correct AC state for current time.
+// Between boundaries: does nothing — radar automation owns the AC within a segment.
 void scheduleLoop()
 {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) return; // No valid time yet — skip silently.
 
-  int currentHour = timeinfo.tm_hour;
+  int currentMin  = timeinfo.tm_hour * 60 + timeinfo.tm_min;
   int currentWday = timeinfo.tm_wday; // 0=Sun, 1=Mon, ..., 6=Sat
 
-  if (currentHour == lastScheduledHour) return; // Already fired this hour.
-  lastScheduledHour = currentHour;
+  bool isBootRun = (lastScheduledMin == -1 || lastScheduledWday == -1);
+  if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday) return; // Same minute, nothing to do.
 
-  char key[13];
-  snprintf(key, sizeof(key), "sch_h_%d", currentWday);
-  if (preferences.getBytesLength(key) != 24) return; // No schedule saved for today.
+  int prevMin  = lastScheduledMin;
+  int prevWday = lastScheduledWday;
 
-  uint8_t slots[24];
-  preferences.getBytes(key, slots, 24);
-  uint8_t slotTemp = slots[currentHour];
+  lastScheduledMin = currentMin;
+  lastScheduledWday = currentWday;
 
-  applyScheduleRadar(currentWday); // Radar first — before the IR command.
-
-  if (slotTemp == 0)
+  // ---- BOOT RECOVERY ----
+  // On first run after power-on or reboot: restore the correct state for right now.
+  if (isBootRun)
   {
-    Serial.printf("[SCHED] %02d:00 -> scheduled OFF\n", currentHour);
-    if (!playCustomButton("ir_off"))
-      sendACFallback(false, 24);
-    acAutoState = AUTO_OFF;
-    indicateIRSent();
+    uint8_t count = loadSegmentCount(currentWday);
+    if (count == 0) return; // No schedule today — don't disturb current AC state.
+    ScheduleSegment seg;
+    if (findSegment(currentWday, currentMin, seg))
+    {
+      applySegmentRadar(seg.radar);
+      applySegmentParams(seg);
+      currentNormalTemp = seg.temp;
+      preferences.putInt("normal_temp", seg.temp);
+      if (!sendScheduleIR(currentWday, seg.temp)) {
+        String k = "ir_" + String(seg.temp);
+        if (!playCustomButton(k.c_str())) sendACFallback(true, seg.temp);
+      }
+      acAutoState = AUTO_ON_NORMAL;
+      indicateIRSent();
+      Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
+                    timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
+    }
+    else
+    {
+      // Outside all segments and a schedule exists — enforce OFF.
+      if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+      acAutoState = AUTO_OFF;
+      indicateIRSent();
+      Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
+                    timeinfo.tm_hour, timeinfo.tm_min);
+    }
+    return;
+  }
+
+  // ---- NORMAL MINUTE TICK ----
+  // Compare against the last minute the scheduler actually evaluated.
+  // If loop() was blocked and skipped one or more minute boundaries, restore the correct state now.
+
+  ScheduleSegment currentSeg;
+  ScheduleSegment prevSeg;
+  bool hasCurrentSeg = findSegment(currentWday, currentMin, currentSeg);
+  bool hasPrevSeg    = findSegment(prevWday, prevMin, prevSeg);
+
+  if (!hasCurrentSeg && !hasPrevSeg) return;
+  if (hasCurrentSeg && hasPrevSeg && sameSegment(currentSeg, prevSeg)) return;
+
+  if (hasCurrentSeg)
+  {
+    // Entering a segment or landing in a different segment after missed ticks.
+    applySegmentRadar(currentSeg.radar);
+    applySegmentParams(currentSeg);
+
+    if (!hasPrevSeg || currentSeg.temp != prevSeg.temp)
+    {
+      currentNormalTemp = currentSeg.temp;
+      preferences.putInt("normal_temp", currentSeg.temp);
+      if (!sendScheduleIR(currentWday, currentSeg.temp)) {
+        String k = "ir_" + String(currentSeg.temp);
+        if (!playCustomButton(k.c_str())) sendACFallback(true, currentSeg.temp);
+      }
+      acAutoState = AUTO_ON_NORMAL;
+      indicateIRSent();
+      Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
+                    timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+    }
+    else
+    {
+      acAutoState = AUTO_ON_NORMAL;
+      Serial.printf("[SCHED] %02d:%02d -> segment updated, AC remains at %dC\n",
+                    timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+    }
   }
   else
   {
-    int targetTemp = (int)slotTemp;
-    currentNormalTemp = targetTemp;
-    preferences.putInt("normal_temp", currentNormalTemp);
-
-    Serial.printf("[SCHED] %02d:00 -> scheduled %d°C\n", currentHour, targetTemp);
-
-    if (!sendScheduleIR(currentWday, targetTemp))
-    {
-      String customKey = "ir_" + String(targetTemp);
-      if (!playCustomButton(customKey.c_str()))
-        sendACFallback(true, targetTemp);
-    }
-    acAutoState = AUTO_ON_NORMAL;
+    // Leaving a segment (gap between segments or all segments ended for the day).
+    if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+    acAutoState = AUTO_OFF;
     indicateIRSent();
+    Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
+                  timeinfo.tm_hour, timeinfo.tm_min);
   }
 }
 
-// ====================================================================
-// ========================= MAIN SETUP ===============================
-// ====================================================================
+// void enforceACState() {
+//   static unsigned long lastEnforceTime = 0;
+//   const unsigned long ENFORCE_INTERVAL = 600000; // 10 minutes (in milliseconds)
 
+//   if (millis() - lastEnforceTime >= ENFORCE_INTERVAL) {
+//     lastEnforceTime = millis();
+    
+//     // Only blast if the system is supposed to be ON
+//     if (acAutoState == AUTO_ON_NORMAL) {
+//       String customKey = "ir_" + String(currentNormalTemp);
+//       if (!playCustomButton(customKey.c_str())) {
+//         sendACFallback(true, currentNormalTemp);
+//       }
+//       Serial.println("[ENFORCE] Re-blasting IR to prevent manual override.");
+//     } 
+//     else if (acAutoState == AUTO_ON_ECO) {
+//       String customKey = "ir_" + String(TEcoTemp);
+//       if (!playCustomButton(customKey.c_str())) {
+//         sendACFallback(true, TEcoTemp);
+//       }
+//       Serial.println("[ENFORCE] Re-blasting ECO IR.");
+//     }
+//   }
+// }
+
+// ========================= MAIN SETUP ===============================
 void setup()
 {
   Serial.begin(115200);
@@ -2197,7 +2441,8 @@ void setup()
   radarAutoMode       = preferences.getBool("radar_auto", false);
   radarManualOverride = preferences.getBool("rad_ovr",   false);
   radarManualValue    = preferences.getBool("rad_ovr_v", false);
-  lastScheduledHour   = -1;    // force scheduleLoop() to fire on first valid tick after boot
+  lastScheduledMin   = -1;    // force scheduleLoop() to fire on first valid tick after boot
+  lastScheduledWday  = -1;
   lastPresenceTime    = millis(); // defensive: prevents emptyDuration from being huge if acAutoState guard is ever removed
 
   Serial.printf("\n[BOOT] Loaded Automation Settings:\n - Eco Temp: %d°C\n - Eco Time: %lu ms\n - Off Time: %lu ms\n", TEcoTemp, TEcoTime, TOffTime);
@@ -2658,6 +2903,7 @@ void loop()
   trackPresenceTime();
   healthLoop();
   scheduleLoop();
+  // enforceACState();
 
   // 3. DASHBOARD MODE (Web Server takes over entirely)
   if (isAPMode)

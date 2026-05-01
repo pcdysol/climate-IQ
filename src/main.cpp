@@ -49,6 +49,7 @@ int currentNormalTemp = 24; // <--- ADD THIS: Remembers the scheduled/manual tem
 int TEcoTemp = 26;          // Default Eco Temperature
 bool hdcInitFailed = false;
 bool radarInitFailed = false;
+bool isInsideSchedule = false;
 
 // ===== Runtime Health Tracking =====
 unsigned long lastRadarDataTime = 0;        // Last time a DATA frame arrived from radar
@@ -58,6 +59,7 @@ const unsigned long RADAR_STALE_MS = 30000; // 30s without a frame = radar is hu
 const int HDC_REINIT_THRESHOLD = 3;         // Attempt I2C reset after this many consecutive NaN reads
 unsigned long TEcoTime = 120000;            // 2 mins (in ms) to trigger Eco Mode
 unsigned long TOffTime = 300000;            // 5 mins (in ms) to turn OFF
+unsigned long lastCommandTime = 0;          // Tracks the exact moment the AC was last commanded
 
 // State machine for automation
 enum AutoState
@@ -70,18 +72,19 @@ AutoState acAutoState = AUTO_OFF;
 
 // ===== Local Scheduler =====
 bool radarManualOverride = false; // true = standalone radar cmd won; schedule radar blocked
-bool radarManualValue    = false;
-int  lastScheduledMin    = -1;   // edge-trigger: -1 = boot (force immediate evaluation)
-int  lastScheduledWday   = -1;   // actual weekday of the last scheduler evaluation
+bool radarManualValue = false;
+int lastScheduledMin = -1;  // edge-trigger: -1 = boot (force immediate evaluation)
+int lastScheduledWday = -1; // actual weekday of the last scheduler evaluation
 
-struct ScheduleSegment {
+struct ScheduleSegment
+{
   uint16_t startMin; // minutes from midnight (0-1439)
   uint16_t endMin;   // minutes from midnight (1-1440, exclusive; 1440 = end of day)
-  uint8_t  temp;     // target temperature (16-32)
-  uint8_t  radar;    // 0=unset, 1=enable, 2=disable (per-segment)
-  uint8_t  eco;      // eco temp override, 0 = inherit global
-  uint8_t  teco;     // eco time minutes override, 0 = inherit global
-  uint8_t  toff;     // off time minutes override, 0 = inherit global
+  uint8_t temp;      // target temperature (16-32)
+  uint8_t radar;     // 0=unset, 1=enable, 2=disable (per-segment)
+  uint8_t eco;       // eco temp override, 0 = inherit global
+  uint8_t teco;      // eco time minutes override, 0 = inherit global
+  uint8_t toff;      // off time minutes override, 0 = inherit global
 }; // 9 bytes per segment
 #define MAX_SEGS_PER_DAY 7
 
@@ -188,8 +191,8 @@ void scheduleLoop();
 void handleScheduleCommand(JsonDocument &doc);
 void setSystemTimeFromGSM();
 uint8_t loadSegmentCount(int wday);
-bool    loadSegment(int wday, int idx, ScheduleSegment &out);
-int     findSegmentTemp(int wday, int minute);
+bool loadSegment(int wday, int idx, ScheduleSegment &out);
+int findSegmentTemp(int wday, int minute);
 bool processJSON(JsonDocument &doc);
 void publishACK(const char *action, const char *detail);
 void applySegmentRadar(uint8_t radarSetting);
@@ -420,6 +423,20 @@ async function saveDP(){
   var res=await fetch('/setparams?normal_temp='+n+'&eco_temp='+e+'&eco_time='+et+'&off_time='+ot,{method:'POST'});
   alert(await res.text());
 }
+async function fetchSched() {
+  const box = document.getElementById('dsched');
+  box.innerText = "Reading NVS flash memory...";
+  box.style.color = "var(--wait)";
+  try {
+    const res = await fetch('/devschedule');
+    const j = await res.json();
+    box.innerText = JSON.stringify(j, null, 2);
+    box.style.color = "#a5b4fc"; // Reset to standard purple/blue
+  } catch(e) {
+    box.innerText = "Error: Failed to read flash memory.";
+    box.style.color = "var(--err)";
+  }
+}
 window.onload=function(){refresh();};
 </script>
 </head>
@@ -471,9 +488,16 @@ window.onload=function(){refresh();};
 
   <div class="card">
     <h3>System Admin</h3>
+    
+    <!-- Danger Zone Group -->
+    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">Danger Zone</div>
     <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doAct('Reset','/reset')">Reset IR Memory</button>
-    <button class="btn-w" onclick="window.location.href='/update'">OTA Firmware Update</button>
-    <button class="btn-t" onclick="openDM()">Developer Mode</button>
+    <button style="background:#450a0a; color:#f87171; border:1px solid #7f1d1d; margin-bottom:20px;" onclick="if(confirm('Wipe WiFi and Reboot?'))doAct('Wipe WiFi','/resetwifi')">Wipe WiFi Credentials</button>
+    
+    <!-- System Tools Group -->
+    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">System Tools</div>
+    <button class="btn-v" onclick="window.location.href='/update'">OTA Firmware Update</button>
+    <button style="background:#1e293b; color:#cbd5e1; border:1px solid #334155;" onclick="openDM()">&#128295; Developer Mode</button>
   </div>
 
   <div class="card">
@@ -536,6 +560,13 @@ window.onload=function(){refresh();};
       <div class="dr"><span class="dk">Radar Sensor</span><span class="dv" id="dvr">&#8212;</span></div>
       <div class="dr"><span class="dk">HDC1080 Sensor</span><span class="dv" id="dvhdc">&#8212;</span></div>
       <div class="dr"><span class="dk">Radar Auto Mode</span><span class="dv" id="dva">&#8212;</span></div>
+    </div>
+    <div class="card" style="grid-column: 1 / -1;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <h3 style="border:none; margin:0; padding:0;">Flash Memory: Local Schedule Dump</h3>
+        <button class="btn-v" style="width:auto; padding:5px 12px; margin:0;" onclick="fetchSched()">Load from Flash</button>
+      </div>
+      <pre id="dsched" style="background:#0f172a; padding:12px; border-radius:6px; font-size:0.75rem; color:#a5b4fc; max-height:250px; overflow-y:auto; margin:0; border:1px solid #1e293b;">Click 'Load from Flash' to view active memory...</pre>
     </div>
   </div>
 </div>
@@ -889,23 +920,54 @@ void setupWebServer()
 
   server.on("/reset", HTTP_GET, []()
             {
-    preferences.clear();
+    // 1. Remove the recognized protocol
+    preferences.remove("protocol_name");
+
+    // 2. Remove standard ON/OFF custom buttons
+    preferences.remove("ir_on");  preferences.remove("has_ir_on");
+    preferences.remove("ir_off"); preferences.remove("has_ir_off");
+
+    // 3. Loop through and remove ALL possible custom temperature buttons (16°C to 32°C)
+    for (int i = 16; i <= 32; i++) {
+      String key = "ir_" + String(i);
+      String hasKey = "has_" + key;
+      preferences.remove(key.c_str());
+      preferences.remove(hasKey.c_str());
+    }
+
     indicateSuccess(); delay(100); indicateSuccess();
-    server.send(200, "text/plain", "Memory Wiped Clean."); });
+    server.send(200, "text/plain", "IR Memory Wiped. WiFi & Settings Preserved."); });
 
-  server.on("/calibrate/auto",  HTTP_GET, []() { calibrateRadarAuto(); });
-  server.on("/calibrate/reset", HTTP_GET, []() { calibrateRadarReset(); });
+  server.on("/resetwifi", HTTP_GET, []() {
+    preferences.remove("wifi_ssid");
+    preferences.remove("wifi_pass");
+    
+    // Flash the success LEDs
+    indicateSuccess(); delay(100); indicateSuccess();
+    
+    server.send(200, "text/plain", "WiFi Credentials Wiped. Rebooting to AP mode...");
+    
+    // Force a reboot so the system realizes it has no credentials and launches the hotspot
+    pendingReboot = true;
+    rebootTime = millis() + 2000; 
+  });
 
-  server.on("/devauth", HTTP_GET, []() {
+  server.on("/calibrate/auto", HTTP_GET, []()
+            { calibrateRadarAuto(); });
+  server.on("/calibrate/reset", HTTP_GET, []()
+            { calibrateRadarReset(); });
+
+  server.on("/devauth", HTTP_GET, []()
+            {
     String pass = server.hasArg("pass") ? server.arg("pass") : "";
     JsonDocument doc;
     doc["ok"] = (pass == String(dev_password));
     String json;
     serializeJson(doc, json);
-    server.send(200, "application/json", json);
-  });
+    server.send(200, "application/json", json); });
 
-  server.on("/devdata", HTTP_GET, []() {
+  server.on("/devdata", HTTP_GET, []()
+            {
     JsonDocument doc;
     if (sensorReady) {
       const MyLD2410::ValuesArray& mvSig = sensor.getMovingSignals();
@@ -930,10 +992,10 @@ void setupWebServer()
     doc["hdc_ok"]       = !hdcInitFailed;
     String json;
     serializeJson(doc, json);
-    server.send(200, "application/json", json);
-  });
+    server.send(200, "application/json", json); });
 
-  server.on("/setparams", HTTP_POST, []() {
+  server.on("/setparams", HTTP_POST, []()
+            {
     bool changed = false;
     if (server.hasArg("normal_temp")) {
       currentNormalTemp = constrain(server.arg("normal_temp").toInt(), 16, 32);
@@ -963,7 +1025,46 @@ void setupWebServer()
       server.send(200, "text/plain", "Parameters saved successfully.");
     } else {
       server.send(400, "text/plain", "No valid parameters provided.");
+    } });
+
+  server.on("/devschedule", HTTP_GET, []() {
+    JsonDocument doc; 
+    const char* days[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    
+    bool hasAnyData = false;
+
+    // Loop through all 7 days in NVS flash
+    for (int w = 0; w < 7; w++) {
+      uint8_t count = loadSegmentCount(w);
+      if (count > 0) {
+        hasAnyData = true;
+        JsonArray dayArr = doc[days[w]].to<JsonArray>();
+        
+        for (int i = 0; i < count; i++) {
+          ScheduleSegment seg;
+          if (loadSegment(w, i, seg)) {
+            JsonObject s = dayArr.add<JsonObject>();
+            
+            // Format minutes (e.g., 130 -> "02:10")
+            char startStr[6]; char endStr[6];
+            snprintf(startStr, sizeof(startStr), "%02d:%02d", seg.startMin / 60, seg.startMin % 60);
+            snprintf(endStr, sizeof(endStr), "%02d:%02d", seg.endMin / 60, seg.endMin % 60);
+            
+            s["time"] = String(startStr) + " to " + String(endStr);
+            s["temp"] = seg.temp;
+            s["radar"] = (seg.radar == 1) ? "ON" : (seg.radar == 2) ? "OFF" : "Unset";
+          }
+        }
+      }
     }
+
+    if (!hasAnyData) {
+      doc["status"] = "No schedules currently saved in flash.";
+    }
+
+    String json;
+    serializeJson(doc, json);
+    server.send(200, "application/json", json); 
   });
 
   server.on("/update", HTTP_GET, []()
@@ -1119,6 +1220,30 @@ void sendACFallback(bool turnOn, int targetTemp)
   ac.sendAc();
 }
 
+void executeACCommand(bool turnOn, int targetTemp, const char *triggerSource)
+{
+  lastCommandTime = millis(); // <--- ADD THIS LINE: Reset the 15-minute clock!
+  // 1. Determine which custom button to look for
+  String customKey = turnOn ? ("ir_" + String(targetTemp)) : "ir_off";
+
+  // 2. Try custom button first, fallback to universal protocol if missing
+  if (!playCustomButton(customKey.c_str()))
+  {
+    sendACFallback(turnOn, targetTemp);
+  }
+
+  // 3. Blink the visual indicator
+  indicateIRSent();
+
+  // 4. Send the MQTT ACK to the cloud
+  char detail[64];
+  snprintf(detail, sizeof(detail), "state=%s,temp=%d", turnOn ? "ON" : "OFF", targetTemp);
+  publishACK(triggerSource, detail);
+
+  // 5. Log to Serial
+  Serial.printf("[%s] IR Transmitted: %s\n", triggerSource, detail);
+}
+
 bool processJSON(JsonDocument &doc)
 {
   bool isValidCommand = false;
@@ -1159,8 +1284,8 @@ bool processJSON(JsonDocument &doc)
       detail = "disabled";
     }
     radarManualOverride = true;
-    radarManualValue    = radarAutoMode;
-    preferences.putBool("rad_ovr",   true);
+    radarManualValue = radarAutoMode;
+    preferences.putBool("rad_ovr", true);
     preferences.putBool("rad_ovr_v", radarAutoMode);
     publishACK("radar", detail);
     isValidCommand = true;
@@ -1170,9 +1295,18 @@ bool processJSON(JsonDocument &doc)
   {
     currentNormalTemp = doc["temperature_setting"].as<int>();
     preferences.putInt("normal_temp", currentNormalTemp);
-    Serial.printf("Updated Normal Temp: %d°C\n", currentNormalTemp);
-    char detail[32]; snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
-    publishACK("temperature_setting", detail);
+    // ---> NEW: Apply immediately if currently running in Normal Mode <---
+    if (acAutoState == AUTO_ON_NORMAL)
+    {
+      executeACCommand(true, currentNormalTemp, "update_temp");
+    }
+    else
+    {
+      // ONLY send this if executeACCommand didn't just send one!
+      char detail[32];
+      snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
+      publishACK("temperature_setting", detail);
+    }
     isValidCommand = true;
   }
 
@@ -1180,9 +1314,17 @@ bool processJSON(JsonDocument &doc)
   {
     TEcoTemp = doc["eco"].as<int>();
     preferences.putInt("eco_temp", TEcoTemp);
-    Serial.printf("Updated TEcoTemp: %d°C\n", TEcoTemp);
-    char detail[32]; snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
-    publishACK("eco", detail);
+    // ---> NEW: Apply immediately if currently running in Eco Mode <---
+    if (acAutoState == AUTO_ON_ECO)
+    {
+      executeACCommand(true, TEcoTemp, "update_eco");
+    }
+    else
+    {
+      char detail[32];
+      snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
+      publishACK("eco", detail);
+    }
     isValidCommand = true;
   }
 
@@ -1191,7 +1333,8 @@ bool processJSON(JsonDocument &doc)
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
     preferences.putULong("eco_time", TEcoTime);
     Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
-    char detail[32]; snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
+    char detail[32];
+    snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
     publishACK("teco", detail);
     isValidCommand = true;
   }
@@ -1206,7 +1349,8 @@ bool processJSON(JsonDocument &doc)
     }
     preferences.putULong("off_time", TOffTime);
     Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
-    char detail[32]; snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
+    char detail[32];
+    snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
     publishACK("toff", detail);
     isValidCommand = true;
   }
@@ -1219,34 +1363,30 @@ bool processJSON(JsonDocument &doc)
 
     if (cmdNum == 1)
     {
-      if (!playCustomButton("ir_on")) sendACFallback(true, 24);
-      indicateIRSent();
+      executeACCommand(true, currentNormalTemp, "manual_on");
       acAutoState = AUTO_ON_NORMAL;
       snprintf(detail, sizeof(detail), "ir_on");
     }
     else if (cmdNum == 2)
     {
-      if (!playCustomButton("ir_off")) sendACFallback(false, 24);
-      indicateIRSent();
+      executeACCommand(false, 24, "manual_off");
       acAutoState = AUTO_OFF;
       snprintf(detail, sizeof(detail), "ir_off");
     }
     else if (cmdNum >= 3 && cmdNum <= 17)
     {
       int targetTemp = cmdNum + 13;
-      String customKey = "ir_" + String(targetTemp);
-      Serial.printf("Action: Set Temp to %d°C\n", targetTemp);
-      if (!playCustomButton(customKey.c_str())) sendACFallback(true, targetTemp);
-      indicateIRSent();
+      executeACCommand(true, targetTemp, "manual_temp");
       acAutoState = AUTO_ON_NORMAL;
       snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
     }
     else
     {
-      Serial.println("ERROR: IR command code out of range.");
       snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
+      publishACK("ir", detail);
     }
-    publishACK("ir", detail);
+    // Note: executeACCommand already publishes an ACK for the IR blast,
+    // but keeping this publishACK handles the broader 'ir' topic response
     isValidCommand = true;
   }
 
@@ -1263,7 +1403,8 @@ bool processJSON(JsonDocument &doc)
         if (size <= 256)
         {
           uint8_t ac_state[size];
-          for (int i = 0; i < size; i++) ac_state[i] = stateArray[i].as<uint8_t>();
+          for (int i = 0; i < size; i++)
+            ac_state[i] = stateArray[i].as<uint8_t>();
           irsend.send(irProtocol, ac_state, size);
           indicateIRSent();
         }
@@ -1292,7 +1433,11 @@ void callback(char *topic, byte *payload, unsigned int length)
 
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, payload, length);
-  if (error) { Serial.println("JSON Parse Failed"); return; }
+  if (error)
+  {
+    Serial.println("JSON Parse Failed");
+    return;
+  }
 
   // ONLY send an ack if a valid command was executed
   processJSON(doc);
@@ -1430,7 +1575,7 @@ void checkIncomingData()
           if (!deserializeJson(doc, jsonStr))
           {
             Serial.println("\n[GSM] Message Received.");
-            
+
             // ONLY send an ack if a valid command was executed
             processJSON(doc);
           }
@@ -1557,19 +1702,23 @@ void publishACK(const char *action, const char *detail)
   JsonDocument doc;
   String id = switch_gsm_wifi ? device_id : gsmClientId;
   JsonObject obj = doc[id].to<JsonObject>();
-  obj["ack"]    = "ok";
+  obj["ack"] = "ok";
   obj["action"] = action;
   obj["detail"] = detail;
   char buf[256];
   serializeJson(doc, buf);
 
-  if (switch_gsm_wifi) {
+  if (switch_gsm_wifi)
+  {
     if (client.connected())
       client.publish(mqttTopic.c_str(), buf);
-  } else {
+  }
+  else
+  {
     String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
     String resp = sendAT(cmd, 3000);
-    if (resp.indexOf(">") != -1) {
+    if (resp.indexOf(">") != -1)
+    {
       SerialAT.print(buf);
       SerialAT.write(0x1A);
     }
@@ -1693,7 +1842,7 @@ void healthLoop()
       sensorSerial.end();
       delay(200);
       sensorSerial.begin(256000, SERIAL_8N1, RX_PIN, TX_PIN);
-      
+
       Serial.println("[HEALTH] Waiting for radar UART heartbeat...");
       unsigned long startWait = millis();
       bool radarAlive = false;
@@ -1701,9 +1850,9 @@ void healthLoop()
       // Active Listening: Wait up to 5s for the radar to wake back up
       while (millis() - startWait < 5000)
       {
-        esp_task_wdt_reset(); 
+        esp_task_wdt_reset();
         handleButton(); // <--- Keep the physical button responsive during recovery
-        
+
         if (sensorSerial.available())
         {
           radarAlive = true;
@@ -1714,21 +1863,46 @@ void healthLoop()
 
       if (radarAlive)
       {
-        while(sensorSerial.available()) sensorSerial.read(); // Clear garbage bytes
-        
-        if (sensor.begin())
+        // FIX Bug 1 (healthLoop): same settling delay as setup() — radar may still be
+        // mid-boot-sequence even though bytes are flowing. Drain while we wait.
+        Serial.println("[HEALTH] UART active — settling 1.5s before sending begin()...");
+        unsigned long settleStart = millis();
+        while (millis() - settleStart < 1500)
+        {
+          esp_task_wdt_reset();
+          handleButton();
+          while (sensorSerial.available())
+            sensorSerial.read();
+          delay(50);
+        }
+
+        // Retry begin() up to 3 times with short delays
+        bool began = false;
+        for (int attempt = 1; attempt <= 3 && !began; attempt++)
+        {
+          if (attempt > 1)
+          {
+            Serial.printf("[HEALTH] begin() attempt %d/3...\n", attempt);
+            delay(500);
+            while (sensorSerial.available())
+              sensorSerial.read();
+          }
+          began = sensor.begin();
+        }
+
+        if (began)
         {
           sensor.enhancedMode();
           sensorReady = true;
           radarStaleAlerted = false;
-          lastRadarDataTime = millis();
+          lastRadarDataTime = millis(); // FIX Bug 2: re-seed timestamp on recovery too
           publishHealthAlert("radar_recovered", "Re-init succeeded");
           Serial.println("[HEALTH] Radar re-init SUCCESS.");
         }
         else
         {
           radarStaleAlerted = true;
-          publishHealthAlert("radar_stale", "UART active, protocol failed");
+          publishHealthAlert("radar_stale", "UART active, protocol failed after 3 attempts");
           Serial.println("[HEALTH] Radar re-init FAILED (Protocol error).");
         }
       }
@@ -1737,10 +1911,10 @@ void healthLoop()
         radarStaleAlerted = true;
         publishHealthAlert("radar_dead", "No UART heartbeat after 5s");
         Serial.println("[HEALTH] Radar re-init FAILED (No hardware response).");
-        
-        // OPTIONAL: If you want the ESP32 to completely reboot itself when 
+
+        // OPTIONAL: If you want the ESP32 to completely reboot itself when
         // the radar dies during runtime, you can uncomment the line below.
-        // ESP.restart(); 
+        // ESP.restart();
       }
     }
   }
@@ -1800,7 +1974,7 @@ void calibrateRadarAuto()
   }
 
   sensor.enhancedMode(); // Return to streaming mode regardless of result
-  sensorReady       = true;
+  sensorReady = true;
   lastRadarDataTime = millis(); // Reset staleness timer
 
   if (done && finalStatus == 5)
@@ -1851,7 +2025,7 @@ void calibrateRadarReset()
   if (sensor.begin())
   {
     sensor.enhancedMode();
-    sensorReady       = true;
+    sensorReady = true;
     lastRadarDataTime = millis();
     indicateSuccess();
     server.send(200, "text/plain", "Factory reset done. Sensor reinitialized with default thresholds.");
@@ -1867,7 +2041,8 @@ void calibrateRadarReset()
 
 void automationLoop()
 {
-  if (!radarAutoMode || !sensorReady)
+  // ---> NEW: Radar is strictly disabled if outside scheduling hours!
+  if (!radarAutoMode || !sensorReady || !isInsideSchedule)
     return;
 
   if (cachedPresence)
@@ -1877,18 +2052,8 @@ void automationLoop()
     // If someone enters and it's not in normal mode, turn it ON to 24°C
     if (acAutoState != AUTO_ON_NORMAL)
     {
-      String customKey = "ir_" + String(currentNormalTemp);
-
-      // Try to play custom temp button (e.g., ir_26), fallback to universal IR code
-      if (!playCustomButton(customKey.c_str()))
-      {
-        sendACFallback(true, currentNormalTemp);
-      }
+      executeACCommand(true, currentNormalTemp, "radar_presence");
       acAutoState = AUTO_ON_NORMAL;
-      indicateIRSent();
-      Serial.println("[AUTO] Presence detected! AC turned ON (Normal Mode).");
-
-      // NEW: Send Immediate "Turn ON" Event
       sendAutomationEvent("1000");
     }
   }
@@ -1896,33 +2061,16 @@ void automationLoop()
   {
     unsigned long emptyDuration = millis() - lastPresenceTime;
 
-    // Check ECO condition FIRST to ensure it doesn't get skipped if times overlap
     if (acAutoState == AUTO_ON_NORMAL && emptyDuration >= TEcoTime && emptyDuration < TOffTime)
     {
-      String customKey = "ir_" + String(TEcoTemp);
-
-      // Try to play custom Eco temp button, fallback to universal IR code
-      if (!playCustomButton(customKey.c_str()))
-      {
-        sendACFallback(true, TEcoTemp);
-      }
+      executeACCommand(true, TEcoTemp, "radar_eco");
       acAutoState = AUTO_ON_ECO;
-      indicateIRSent();
-      Serial.printf("[AUTO] Room empty for TEcoTime! AC set to Eco Temp: %d°C\n", TEcoTemp);
-
-      // NEW: Send Immediate "ECO" Event
       sendAutomationEvent("2000");
     }
-    // Check OFF condition NEXT (Longest duration)
     else if (acAutoState != AUTO_OFF && emptyDuration >= TOffTime)
     {
-      if (!playCustomButton("ir_off"))
-        sendACFallback(false, 24);
+      executeACCommand(false, 24, "radar_off");
       acAutoState = AUTO_OFF;
-      indicateIRSent();
-      Serial.println("[AUTO] Room empty for TOffTime! AC turned OFF.");
-
-      // NEW: Send Immediate "Turn OFF" Event
       sendAutomationEvent("3000");
     }
   }
@@ -1955,19 +2103,21 @@ void setSystemTimeFromGSM()
 {
   String response = sendAT("AT+CCLK?", 2000);
   int first = response.indexOf('"');
-  int last  = response.lastIndexOf('"');
-  if (first == -1 || last == -1) return;
+  int last = response.lastIndexOf('"');
+  if (first == -1 || last == -1)
+    return;
   String t = response.substring(first + 1, last);
-  if (t.length() < 17) return;
+  if (t.length() < 17)
+    return;
   struct tm timeinfo = {};
-  timeinfo.tm_year  = t.substring(0, 2).toInt() + 100;
-  timeinfo.tm_mon   = t.substring(3, 5).toInt() - 1;
-  timeinfo.tm_mday  = t.substring(6, 8).toInt();
-  timeinfo.tm_hour  = t.substring(9, 11).toInt();
-  timeinfo.tm_min   = t.substring(12, 14).toInt();
-  timeinfo.tm_sec   = t.substring(15, 17).toInt();
-  time_t utc        = mktime(&timeinfo);
-  utc              += (gmtOffset_sec); // apply same offset as NTP path
+  timeinfo.tm_year = t.substring(0, 2).toInt() + 100;
+  timeinfo.tm_mon = t.substring(3, 5).toInt() - 1;
+  timeinfo.tm_mday = t.substring(6, 8).toInt();
+  timeinfo.tm_hour = t.substring(9, 11).toInt();
+  timeinfo.tm_min = t.substring(12, 14).toInt();
+  timeinfo.tm_sec = t.substring(15, 17).toInt();
+  time_t utc = mktime(&timeinfo);
+  utc += (gmtOffset_sec); // apply same offset as NTP path
   struct timeval tv = {utc, 0};
   settimeofday(&tv, nullptr);
   Serial.println("[SCHED] System clock synced from GSM modem.");
@@ -1978,13 +2128,20 @@ int dayNameToWday(const String &day)
 {
   String d = day;
   d.toLowerCase();
-  if (d == "sunday")    return 0;
-  if (d == "monday")    return 1;
-  if (d == "tuesday")   return 2;
-  if (d == "wednesday") return 3;
-  if (d == "thursday")  return 4;
-  if (d == "friday")    return 5;
-  if (d == "saturday")  return 6;
+  if (d == "sunday")
+    return 0;
+  if (d == "monday")
+    return 1;
+  if (d == "tuesday")
+    return 2;
+  if (d == "wednesday")
+    return 3;
+  if (d == "thursday")
+    return 4;
+  if (d == "friday")
+    return 5;
+  if (d == "saturday")
+    return 6;
   return -1;
 }
 
@@ -2002,17 +2159,18 @@ bool loadSegment(int wday, int idx, ScheduleSegment &out)
   char key[13];
   snprintf(key, sizeof(key), "sch_seg_%d", wday);
   size_t len = preferences.getBytesLength(key);
-  if (len < (size_t)((idx + 1) * 9)) return false;
+  if (len < (size_t)((idx + 1) * 9))
+    return false;
   uint8_t buf[MAX_SEGS_PER_DAY * 9];
   preferences.getBytes(key, buf, len);
-  int o        = idx * 9;
-  out.startMin = (uint16_t)(buf[o]     | (buf[o + 1] << 8));
-  out.endMin   = (uint16_t)(buf[o + 2] | (buf[o + 3] << 8));
-  out.temp     = buf[o + 4];
-  out.radar    = buf[o + 5];
-  out.eco      = buf[o + 6];
-  out.teco     = buf[o + 7];
-  out.toff     = buf[o + 8];
+  int o = idx * 9;
+  out.startMin = (uint16_t)(buf[o] | (buf[o + 1] << 8));
+  out.endMin = (uint16_t)(buf[o + 2] | (buf[o + 3] << 8));
+  out.temp = buf[o + 4];
+  out.radar = buf[o + 5];
+  out.eco = buf[o + 6];
+  out.teco = buf[o + 7];
+  out.toff = buf[o + 8];
   return true;
 }
 
@@ -2023,8 +2181,10 @@ int findSegmentTemp(int wday, int minute)
   for (uint8_t i = 0; i < count; i++)
   {
     ScheduleSegment seg;
-    if (!loadSegment(wday, i, seg)) continue;
-    if (minute >= (int)seg.startMin && minute < (int)seg.endMin) return seg.temp;
+    if (!loadSegment(wday, i, seg))
+      continue;
+    if (minute >= (int)seg.startMin && minute < (int)seg.endMin)
+      return seg.temp;
   }
   return 0;
 }
@@ -2035,8 +2195,10 @@ bool findSegment(int wday, int minute, ScheduleSegment &out)
   uint8_t count = loadSegmentCount(wday);
   for (uint8_t i = 0; i < count; i++)
   {
-    if (!loadSegment(wday, i, out)) continue;
-    if (minute >= (int)out.startMin && minute < (int)out.endMin) return true;
+    if (!loadSegment(wday, i, out))
+      continue;
+    if (minute >= (int)out.startMin && minute < (int)out.endMin)
+      return true;
   }
   return false;
 }
@@ -2044,12 +2206,12 @@ bool findSegment(int wday, int minute, ScheduleSegment &out)
 bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b)
 {
   return a.startMin == b.startMin &&
-         a.endMin   == b.endMin   &&
-         a.temp     == b.temp     &&
-         a.radar    == b.radar    &&
-         a.eco      == b.eco      &&
-         a.teco     == b.teco     &&
-         a.toff     == b.toff;
+         a.endMin == b.endMin &&
+         a.temp == b.temp &&
+         a.radar == b.radar &&
+         a.eco == b.eco &&
+         a.teco == b.teco &&
+         a.toff == b.toff;
 }
 
 // Persist one day's segment schedule to NVS (9 bytes per segment).
@@ -2061,16 +2223,16 @@ void saveSchedule(int wday, const ScheduleSegment segs[], uint8_t count,
   uint8_t buf[MAX_SEGS_PER_DAY * 9];
   for (uint8_t i = 0; i < count; i++)
   {
-    int o    = i * 9;
-    buf[o]   = segs[i].startMin & 0xFF;
-    buf[o+1] = (segs[i].startMin >> 8) & 0xFF;
-    buf[o+2] = segs[i].endMin & 0xFF;
-    buf[o+3] = (segs[i].endMin >> 8) & 0xFF;
-    buf[o+4] = segs[i].temp;
-    buf[o+5] = segs[i].radar;
-    buf[o+6] = segs[i].eco;
-    buf[o+7] = segs[i].teco;
-    buf[o+8] = segs[i].toff;
+    int o = i * 9;
+    buf[o] = segs[i].startMin & 0xFF;
+    buf[o + 1] = (segs[i].startMin >> 8) & 0xFF;
+    buf[o + 2] = segs[i].endMin & 0xFF;
+    buf[o + 3] = (segs[i].endMin >> 8) & 0xFF;
+    buf[o + 4] = segs[i].temp;
+    buf[o + 5] = segs[i].radar;
+    buf[o + 6] = segs[i].eco;
+    buf[o + 7] = segs[i].teco;
+    buf[o + 8] = segs[i].toff;
   }
   snprintf(key, sizeof(key), "sch_cnt_%d", wday);
   preferences.putUChar(key, count);
@@ -2090,11 +2252,13 @@ bool sendScheduleIR(int wday, int targetTemp)
   char key[13];
   snprintf(key, sizeof(key), "sch_irt_%d", wday);
   int storedTemp = preferences.getInt(key, -1);
-  if (storedTemp != targetTemp) return false;
+  if (storedTemp != targetTemp)
+    return false;
 
   snprintf(key, sizeof(key), "sch_ir_%d", wday);
   String irHex = preferences.getString(key, "");
-  if (irHex.length() == 0) return false;
+  if (irHex.length() == 0)
+    return false;
 
   // Dashboard schedule payloads may send the same 4-digit command codes used by
   // live control messages (e.g. "0011" => cmd 11 => 24C) instead of a raw hex IR frame.
@@ -2114,17 +2278,20 @@ bool sendScheduleIR(int wday, int targetTemp)
     {
       if (cmdNum == 1)
       {
-        if (!playCustomButton("ir_on")) sendACFallback(true, targetTemp);
+        if (!playCustomButton("ir_on"))
+          sendACFallback(true, targetTemp);
       }
       else if (cmdNum == 2)
       {
-        if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+        if (!playCustomButton("ir_off"))
+          sendACFallback(false, 24);
       }
       else
       {
         int cmdTemp = cmdNum + 13;
         String customKey = "ir_" + String(cmdTemp);
-        if (!playCustomButton(customKey.c_str())) sendACFallback(true, cmdTemp);
+        if (!playCustomButton(customKey.c_str()))
+          sendACFallback(true, cmdTemp);
       }
       Serial.printf("[SCHED] Dashboard IR command %s sent for %dC schedule.\n",
                     irHex.c_str(), targetTemp);
@@ -2133,10 +2300,12 @@ bool sendScheduleIR(int wday, int targetTemp)
   }
 
   String proto = preferences.getString("protocol_name", "");
-  if (proto.length() == 0) return false;
+  if (proto.length() == 0)
+    return false;
 
   decode_type_t protocol = strToDecodeType(proto.c_str());
-  if (protocol == decode_type_t::UNKNOWN) return false;
+  if (protocol == decode_type_t::UNKNOWN)
+    return false;
 
   uint64_t code = strtoull(irHex.c_str(), NULL, 16);
   irsend.send(protocol, code, 32);
@@ -2147,8 +2316,10 @@ bool sendScheduleIR(int wday, int targetTemp)
 // Apply a segment's radar setting. Skipped if manual override is active or setting is unset.
 void applySegmentRadar(uint8_t radarSetting)
 {
-  if (radarManualOverride) return;
-  if (radarSetting == 0) return; // unset — leave radar mode as-is
+  if (radarManualOverride)
+    return;
+  if (radarSetting == 0)
+    return; // unset — leave radar mode as-is
 
   if (radarSetting == 1 && !radarAutoMode)
   {
@@ -2181,7 +2352,11 @@ void applySegmentParams(const ScheduleSegment &seg)
   if (seg.toff > 0)
   {
     TOffTime = (unsigned long)seg.toff * 60000UL;
-    if (TOffTime <= TEcoTime) { TOffTime = TEcoTime + 60000UL; Serial.println("[SCHED] TOffTime auto-corrected."); }
+    if (TOffTime <= TEcoTime)
+    {
+      TOffTime = TEcoTime + 60000UL;
+      Serial.println("[SCHED] TOffTime auto-corrected.");
+    }
     preferences.putULong("off_time", TOffTime);
   }
 }
@@ -2190,21 +2365,32 @@ void applySegmentParams(const ScheduleSegment &seg)
 void handleScheduleCommand(JsonDocument &doc)
 {
   const char *day = doc["day"];
-  if (!day) { Serial.println("[SCHED] Missing 'day', ignoring."); return; }
-
-  int wday = dayNameToWday(String(day));
-  if (wday < 0) { Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day); return; }
-
-  JsonArray segsArray = doc["segments"].as<JsonArray>();
-  if (!segsArray || segsArray.size() == 0)
+  if (!day)
   {
-    Serial.println("[SCHED] Missing or empty 'segments' array, ignoring.");
+    Serial.println("[SCHED] Missing 'day', ignoring.");
     return;
   }
+
+  int wday = dayNameToWday(String(day));
+  if (wday < 0)
+  {
+    Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day);
+    return;
+  }
+
+  // Check if the "segments" key exists at all (it's okay if it's empty)
+  if (!doc["segments"])
+  {
+    Serial.println("[SCHED] Missing 'segments' key, ignoring.");
+    return;
+  }
+
+  JsonArray segsArray = doc["segments"].as<JsonArray>();
 
   ScheduleSegment segs[MAX_SEGS_PER_DAY];
   uint8_t count = 0;
 
+  // This loop won't run if the array is empty, leaving count at 0
   for (JsonVariant v : segsArray)
   {
     if (count >= MAX_SEGS_PER_DAY)
@@ -2213,69 +2399,81 @@ void handleScheduleCommand(JsonDocument &doc)
       break;
     }
     int start = v["start"] | -1;
-    int end   = v["end"]   | -1;
-    int temp  = v["temp"]  | 0;
+    int end = v["end"] | -1;
+    int temp = v["temp"] | 0;
 
     if (start < 0 || start > 1439 || end <= start)
     {
       Serial.printf("[SCHED] Segment {start:%d, end:%d} invalid, skipping.\n", start, end);
       continue;
     }
-    if (end > 1440) end = 1440; // clamp: 1440 means "through end of day"
+    if (end > 1440)
+      end = 1440; // clamp: 1440 means "through end of day"
     if (temp < 16 || temp > 32)
     {
       Serial.printf("[SCHED] Temp %d out of range [16-32], skipping segment.\n", temp);
       continue;
     }
 
-    // Per-segment radar: "0100"/"256"/"on" = enable, "0200"/"512"/"off" = disable, absent = 0 (unset).
     uint8_t segRadar = 0;
     if (v["radar"])
     {
       String r = v["radar"].as<String>();
-      if      (r == "0100" || r == "256" || r == "on")  segRadar = 1;
-      else if (r == "0200" || r == "512" || r == "off") segRadar = 2;
+      if (r == "0100" || r == "256" || r == "on")
+        segRadar = 1;
+      else if (r == "0200" || r == "512" || r == "off")
+        segRadar = 2;
     }
 
-    uint8_t segEco  = (uint8_t)(v["eco"]  | 0);
+    uint8_t segEco = (uint8_t)(v["eco"] | 0);
     uint8_t segTeco = (uint8_t)(v["teco"] | 0);
     uint8_t segToff = (uint8_t)(v["toff"] | 0);
 
     segs[count++] = {(uint16_t)start, (uint16_t)end, (uint8_t)temp, segRadar, segEco, segTeco, segToff};
   }
 
-  if (count == 0) { Serial.println("[SCHED] No valid segments found, ignoring."); return; }
-
-  // Sort by startMin (insertion sort — small array).
-  for (int i = 1; i < count; i++)
+  // Only run the sorting and overlap logic if we actually have segments
+  if (count > 0)
   {
-    ScheduleSegment tmp = segs[i];
-    int j = i - 1;
-    while (j >= 0 && segs[j].startMin > tmp.startMin) { segs[j + 1] = segs[j]; j--; }
-    segs[j + 1] = tmp;
-  }
-
-  // Reject overlapping segments (after sort, adjacent ends must not exceed next start).
-  for (int i = 0; i < count - 1; i++)
-  {
-    if (segs[i].endMin > segs[i + 1].startMin)
+    // Sort by startMin (insertion sort)
+    for (int i = 1; i < count; i++)
     {
-      Serial.println("[SCHED] ERROR: Overlapping segments detected — schedule rejected.");
-      return;
+      ScheduleSegment tmp = segs[i];
+      int j = i - 1;
+      while (j >= 0 && segs[j].startMin > tmp.startMin)
+      {
+        segs[j + 1] = segs[j];
+        j--;
+      }
+      segs[j + 1] = tmp;
+    }
+
+    // Reject overlapping segments
+    for (int i = 0; i < count - 1; i++)
+    {
+      if (segs[i].endMin > segs[i + 1].startMin)
+      {
+        Serial.println("[SCHED] ERROR: Overlapping segments detected — schedule rejected.");
+        return;
+      }
     }
   }
+  else
+  {
+    Serial.printf("[SCHED] Empty segments array received. Wiping schedule for %s.\n", day);
+  }
 
-  String irHex  = doc["ir"]                  | "";
-  int    irTemp = doc["temperature_setting"] | 0;
+  String irHex = doc["ir"] | "";
+  int irTemp = doc["temperature_setting"] | 0;
 
+  // Passing a count of 0 overwrites the NVS memory for this day to zero segments
   saveSchedule(wday, segs, count, irHex, irTemp);
 
-  // New schedule is authoritative — clear manual radar override.
-  // Radar will be applied per-segment when scheduleLoop() next fires.
+  // New schedule is authoritative — clear manual radar override
   radarManualOverride = false;
   preferences.putBool("rad_ovr", false);
 
-  // Only force immediate re-evaluation if this schedule is for today.
+  // Only force immediate re-evaluation if this schedule is for today
   struct tm timeinfo;
   if (getLocalTime(&timeinfo) && timeinfo.tm_wday == wday)
   {
@@ -2285,7 +2483,9 @@ void handleScheduleCommand(JsonDocument &doc)
 
   Serial.printf("[SCHED] %d segment(s) saved for %s (wday=%d)\n", count, day, wday);
   indicateSuccess();
-  publishACK("schedule_saved", day);
+
+  // Dynamically change the ACK message so the dashboard knows it was deleted vs updated
+  publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
 }
 
 // Called every loop iteration. Fires at segment boundaries (minute resolution).
@@ -2294,15 +2494,17 @@ void handleScheduleCommand(JsonDocument &doc)
 void scheduleLoop()
 {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) return; // No valid time yet — skip silently.
+  if (!getLocalTime(&timeinfo))
+    return; // No valid time yet — skip silently.
 
-  int currentMin  = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
   int currentWday = timeinfo.tm_wday; // 0=Sun, 1=Mon, ..., 6=Sat
 
   bool isBootRun = (lastScheduledMin == -1 || lastScheduledWday == -1);
-  if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday) return; // Same minute, nothing to do.
+  if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday)
+    return; // Same minute, nothing to do.
 
-  int prevMin  = lastScheduledMin;
+  int prevMin = lastScheduledMin;
   int prevWday = lastScheduledWday;
 
   lastScheduledMin = currentMin;
@@ -2313,7 +2515,8 @@ void scheduleLoop()
   if (isBootRun)
   {
     uint8_t count = loadSegmentCount(currentWday);
-    if (count == 0) return; // No schedule today — don't disturb current AC state.
+    if (count == 0)
+      return; // No schedule today — don't disturb current AC state.
     ScheduleSegment seg;
     if (findSegment(currentWday, currentMin, seg))
     {
@@ -2321,19 +2524,29 @@ void scheduleLoop()
       applySegmentParams(seg);
       currentNormalTemp = seg.temp;
       preferences.putInt("normal_temp", seg.temp);
-      if (!sendScheduleIR(currentWday, seg.temp)) {
-        String k = "ir_" + String(seg.temp);
-        if (!playCustomButton(k.c_str())) sendACFallback(true, seg.temp);
+      if (!sendScheduleIR(currentWday, seg.temp))
+      {
+        // Use executeACCommand instead of the manual fallback logic
+        executeACCommand(true, seg.temp, "boot_schedule_on");
+      }
+      else
+      {
+        // ---> FIX: Ensure hardware blinks and cloud is notified on specific IR success! <---
+        indicateIRSent(); 
+        char detail[32];
+        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+        publishACK("boot_schedule_on", detail);
+        lastCommandTime = millis(); 
       }
       acAutoState = AUTO_ON_NORMAL;
-      indicateIRSent();
       Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
                     timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
     }
     else
     {
       // Outside all segments and a schedule exists — enforce OFF.
-      if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+      if (!playCustomButton("ir_off"))
+        sendACFallback(false, 24);
       acAutoState = AUTO_OFF;
       indicateIRSent();
       Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
@@ -2349,10 +2562,14 @@ void scheduleLoop()
   ScheduleSegment currentSeg;
   ScheduleSegment prevSeg;
   bool hasCurrentSeg = findSegment(currentWday, currentMin, currentSeg);
-  bool hasPrevSeg    = findSegment(prevWday, prevMin, prevSeg);
+  bool hasPrevSeg = findSegment(prevWday, prevMin, prevSeg);
+  // ---> NEW: Globally track if we are currently inside scheduling hours
+  isInsideSchedule = hasCurrentSeg;
 
-  if (!hasCurrentSeg && !hasPrevSeg) return;
-  if (hasCurrentSeg && hasPrevSeg && sameSegment(currentSeg, prevSeg)) return;
+  if (!hasCurrentSeg && !hasPrevSeg)
+    return;
+  if (hasCurrentSeg && hasPrevSeg && sameSegment(currentSeg, prevSeg))
+    return;
 
   if (hasCurrentSeg)
   {
@@ -2364,12 +2581,21 @@ void scheduleLoop()
     {
       currentNormalTemp = currentSeg.temp;
       preferences.putInt("normal_temp", currentSeg.temp);
-      if (!sendScheduleIR(currentWday, currentSeg.temp)) {
-        String k = "ir_" + String(currentSeg.temp);
-        if (!playCustomButton(k.c_str())) sendACFallback(true, currentSeg.temp);
+      if (!sendScheduleIR(currentWday, currentSeg.temp))
+      {
+        // Fallback handles the ACK automatically
+        executeACCommand(true, currentSeg.temp, "schedule_on");
+      }
+      else
+      {
+        // ---> NEW: If specific schedule IR succeeds, we MUST notify the cloud! <---
+        indicateIRSent();
+        char detail[32];
+        snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
+        publishACK("schedule_on", detail);
+        lastCommandTime = millis(); // Reset the 15-min enforcer clock here too!
       }
       acAutoState = AUTO_ON_NORMAL;
-      indicateIRSent();
       Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
                     timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
     }
@@ -2383,38 +2609,33 @@ void scheduleLoop()
   else
   {
     // Leaving a segment (gap between segments or all segments ended for the day).
-    if (!playCustomButton("ir_off")) sendACFallback(false, 24);
+    executeACCommand(false, 24, "schedule_off");
     acAutoState = AUTO_OFF;
-    indicateIRSent();
+    // --> NEW FIX: Force radar automation OFF so it doesn't trigger after hours
+    radarAutoMode = false;
+    preferences.putBool("radar_auto", false);
     Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
                   timeinfo.tm_hour, timeinfo.tm_min);
   }
 }
 
-// void enforceACState() {
-//   static unsigned long lastEnforceTime = 0;
-//   const unsigned long ENFORCE_INTERVAL = 600000; // 10 minutes (in milliseconds)
+void enforceACState()
+{
+  const unsigned long ENFORCE_INTERVAL = 900000; // 15 minutes
 
-//   if (millis() - lastEnforceTime >= ENFORCE_INTERVAL) {
-//     lastEnforceTime = millis();
-    
-//     // Only blast if the system is supposed to be ON
-//     if (acAutoState == AUTO_ON_NORMAL) {
-//       String customKey = "ir_" + String(currentNormalTemp);
-//       if (!playCustomButton(customKey.c_str())) {
-//         sendACFallback(true, currentNormalTemp);
-//       }
-//       Serial.println("[ENFORCE] Re-blasting IR to prevent manual override.");
-//     } 
-//     else if (acAutoState == AUTO_ON_ECO) {
-//       String customKey = "ir_" + String(TEcoTemp);
-//       if (!playCustomButton(customKey.c_str())) {
-//         sendACFallback(true, TEcoTemp);
-//       }
-//       Serial.println("[ENFORCE] Re-blasting ECO IR.");
-//     }
-//   }
-// }
+  // Only run if 15 full minutes have passed since the LAST time the AC was commanded
+  if (millis() - lastCommandTime >= ENFORCE_INTERVAL)
+  {
+    lastCommandTime = millis(); // Reset the clock
+
+    if (acAutoState == AUTO_ON_NORMAL)
+      executeACCommand(true, currentNormalTemp, "enforce_normal");
+    else if (acAutoState == AUTO_ON_ECO)
+      executeACCommand(true, TEcoTemp, "enforce_eco");
+    else if (acAutoState == AUTO_OFF)
+      executeACCommand(false, 24, "enforce_off");
+  }
+}
 
 // ========================= MAIN SETUP ===============================
 void setup()
@@ -2438,12 +2659,12 @@ void setup()
   TOffTime = preferences.getULong("off_time", 300000);
   currentNormalTemp = preferences.getInt("normal_temp", 24);
 
-  radarAutoMode       = preferences.getBool("radar_auto", false);
-  radarManualOverride = preferences.getBool("rad_ovr",   false);
-  radarManualValue    = preferences.getBool("rad_ovr_v", false);
-  lastScheduledMin   = -1;    // force scheduleLoop() to fire on first valid tick after boot
-  lastScheduledWday  = -1;
-  lastPresenceTime    = millis(); // defensive: prevents emptyDuration from being huge if acAutoState guard is ever removed
+  radarAutoMode = preferences.getBool("radar_auto", false);
+  radarManualOverride = preferences.getBool("rad_ovr", false);
+  radarManualValue = preferences.getBool("rad_ovr_v", false);
+  lastScheduledMin = -1; // force scheduleLoop() to fire on first valid tick after boot
+  lastScheduledWday = -1;
+  lastPresenceTime = millis(); // defensive: prevents emptyDuration from being huge if acAutoState guard is ever removed
 
   Serial.printf("\n[BOOT] Loaded Automation Settings:\n - Eco Temp: %d°C\n - Eco Time: %lu ms\n - Off Time: %lu ms\n", TEcoTemp, TEcoTime, TOffTime);
 
@@ -2484,41 +2705,73 @@ void setup()
   sensorSerial.setRxBufferSize(512); // doubles the default 256-byte HW FIFO; persists across end()/begin()
   sensorSerial.begin(256000, SERIAL_8N1, RX_PIN, TX_PIN);
   Serial.print("Waiting for LD2410 UART heartbeat (up to 5s)");
-  
+
   unsigned long startWait = millis();
+  unsigned long lastDotTime = millis(); // FIX Bug 3: proper dot timer instead of unreliable % 500
   bool radarAlive = false;
 
   // Listen for actual data on the RX line
   while (millis() - startWait < 5000)
   {
     esp_task_wdt_reset(); // Keep watchdog happy during the wait
-    
+
     if (sensorSerial.available())
     {
       radarAlive = true;
       break;
     }
-    
-    if ((millis() - startWait) % 500 == 0) Serial.print("."); // Print dots every 500ms
-    delay(10); 
+
+    // FIX Bug 3: use elapsed-time comparison, not modulo (modulo skips when delay(10) overshoots)
+    if (millis() - lastDotTime >= 500)
+    {
+      Serial.print(".");
+      lastDotTime = millis();
+    }
+    delay(10);
   }
   Serial.println();
 
   if (radarAlive)
   {
-    // Drain any garbage bytes from the hardware boot sequence
-    while(sensorSerial.available()) sensorSerial.read(); 
-    
-    if (sensor.begin())
+    // FIX Bug 1: The LD2410 emits startup bytes while still mid-boot and NOT yet responsive
+    // to configuration commands. Drain the initial burst, then wait ~1.5s for the radar to
+    // finish its internal boot sequence before sending sensor.begin() commands.
+    Serial.println("[RADAR] UART active — waiting for radar to finish boot sequence...");
+    unsigned long settleStart = millis();
+    while (millis() - settleStart < 1500)
     {
-      sensorReady = true;
+      esp_task_wdt_reset();
+      while (sensorSerial.available())
+        sensorSerial.read(); // Keep draining startup bytes while we wait
+      delay(50);
+    }
+
+    // Retry sensor.begin() up to 3 times. On a cold-power boot the first attempt
+    // may still catch the radar mid-sequence; retries cover that window.
+    bool began = false;
+    for (int attempt = 1; attempt <= 3 && !began; attempt++)
+    {
+      if (attempt > 1)
+      {
+        Serial.printf("[RADAR] begin() attempt %d/3 — retrying in 500ms...\n", attempt);
+        delay(500);
+        while (sensorSerial.available())
+          sensorSerial.read(); // Drain any new bytes before retrying
+      }
+      began = sensor.begin();
+    }
+
+    if (began)
+    {
       sensor.enhancedMode();
+      sensorReady = true;
+      lastRadarDataTime = millis(); // FIX Bug 2: seed timestamp so stale-watchdog works from t=0
       Serial.println("✓ LD2410 Radar initialized successfully.");
     }
     else
     {
       radarInitFailed = true;
-      Serial.println("⚠ Warning: Radar UART active, but begin() sequence failed.");
+      Serial.println("⚠ Warning: Radar UART active, but begin() sequence failed after 3 attempts.");
     }
   }
   else
@@ -2903,7 +3156,7 @@ void loop()
   trackPresenceTime();
   healthLoop();
   scheduleLoop();
-  // enforceACState();
+  enforceACState();
 
   // 3. DASHBOARD MODE (Web Server takes over entirely)
   if (isAPMode)

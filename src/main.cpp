@@ -194,7 +194,7 @@ uint8_t loadSegmentCount(int wday);
 bool loadSegment(int wday, int idx, ScheduleSegment &out);
 int findSegmentTemp(int wday, int minute);
 bool processJSON(JsonDocument &doc);
-void publishACK(const char *action, const char *detail);
+// void publishACK(const char *action, const char *detail);
 void applySegmentRadar(uint8_t radarSetting);
 void applySegmentParams(const ScheduleSegment &seg);
 bool findSegment(int wday, int minute, ScheduleSegment &out);
@@ -938,7 +938,8 @@ void setupWebServer()
     indicateSuccess(); delay(100); indicateSuccess();
     server.send(200, "text/plain", "IR Memory Wiped. WiFi & Settings Preserved."); });
 
-  server.on("/resetwifi", HTTP_GET, []() {
+  server.on("/resetwifi", HTTP_GET, []()
+            {
     preferences.remove("wifi_ssid");
     preferences.remove("wifi_pass");
     
@@ -949,8 +950,7 @@ void setupWebServer()
     
     // Force a reboot so the system realizes it has no credentials and launches the hotspot
     pendingReboot = true;
-    rebootTime = millis() + 2000; 
-  });
+    rebootTime = millis() + 2000; });
 
   server.on("/calibrate/auto", HTTP_GET, []()
             { calibrateRadarAuto(); });
@@ -1027,7 +1027,8 @@ void setupWebServer()
       server.send(400, "text/plain", "No valid parameters provided.");
     } });
 
-  server.on("/devschedule", HTTP_GET, []() {
+  server.on("/devschedule", HTTP_GET, []()
+            {
     JsonDocument doc; 
     const char* days[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
     
@@ -1064,8 +1065,7 @@ void setupWebServer()
 
     String json;
     serializeJson(doc, json);
-    server.send(200, "application/json", json); 
-  });
+    server.send(200, "application/json", json); });
 
   server.on("/update", HTTP_GET, []()
             { server.send(200, "text/html", "<form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Upload'></form>"); });
@@ -1236,12 +1236,12 @@ void executeACCommand(bool turnOn, int targetTemp, const char *triggerSource)
   indicateIRSent();
 
   // 4. Send the MQTT ACK to the cloud
-  char detail[64];
-  snprintf(detail, sizeof(detail), "state=%s,temp=%d", turnOn ? "ON" : "OFF", targetTemp);
-  publishACK(triggerSource, detail);
+  // char detail[64];
+  // snprintf(detail, sizeof(detail), "state=%s,temp=%d", turnOn ? "ON" : "OFF", targetTemp);
+  // publishACK(triggerSource, detail);
 
   // 5. Log to Serial
-  Serial.printf("[%s] IR Transmitted: %s\n", triggerSource, detail);
+  // Serial.printf("[%s] IR Transmitted: %s\n", triggerSource, detail);
 }
 
 bool processJSON(JsonDocument &doc)
@@ -1258,7 +1258,7 @@ bool processJSON(JsonDocument &doc)
   {
     String radarStr = doc["radar"].as<String>();
     Serial.println("Received Radar Value: " + radarStr);
-    const char *detail = "unchanged";
+    // const char *detail = "unchanged";
 
     if (radarStr == "0100" || radarStr == "256")
     {
@@ -1270,7 +1270,7 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: ENABLED");
         indicateSuccess();
       }
-      detail = "enabled";
+      // detail = "enabled";
     }
     else if (radarStr == "0200" || radarStr == "512")
     {
@@ -1281,13 +1281,13 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: DISABLED");
         indicateSuccess();
       }
-      detail = "disabled";
+      // detail = "disabled";
     }
     radarManualOverride = true;
     radarManualValue = radarAutoMode;
     preferences.putBool("rad_ovr", true);
     preferences.putBool("rad_ovr_v", radarAutoMode);
-    publishACK("radar", detail);
+    // publishACK("radar", detail);
     isValidCommand = true;
   }
 
@@ -1303,9 +1303,9 @@ bool processJSON(JsonDocument &doc)
     else
     {
       // ONLY send this if executeACCommand didn't just send one!
-      char detail[32];
-      snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
-      publishACK("temperature_setting", detail);
+      // char detail[32];
+      // snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
+      // publishACK("temperature_setting", detail);
     }
     isValidCommand = true;
   }
@@ -1321,9 +1321,9 @@ bool processJSON(JsonDocument &doc)
     }
     else
     {
-      char detail[32];
-      snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
-      publishACK("eco", detail);
+      // char detail[32];
+      // snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
+      // publishACK("eco", detail);
     }
     isValidCommand = true;
   }
@@ -1333,9 +1333,9 @@ bool processJSON(JsonDocument &doc)
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
     preferences.putULong("eco_time", TEcoTime);
     Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
-    char detail[32];
-    snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
-    publishACK("teco", detail);
+    // char detail[32];
+    // snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
+    // publishACK("teco", detail);
     isValidCommand = true;
   }
 
@@ -1349,9 +1349,9 @@ bool processJSON(JsonDocument &doc)
     }
     preferences.putULong("off_time", TOffTime);
     Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
-    char detail[32];
-    snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
-    publishACK("toff", detail);
+    // char detail[32];
+    // snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
+    // publishACK("toff", detail);
     isValidCommand = true;
   }
 
@@ -1359,31 +1359,31 @@ bool processJSON(JsonDocument &doc)
   {
     int cmdNum = doc["ir"].as<int>();
     Serial.printf("Received IR Command Code: %d\n", cmdNum);
-    char detail[32];
+    // char detail[32];
 
     if (cmdNum == 1)
     {
       executeACCommand(true, currentNormalTemp, "manual_on");
       acAutoState = AUTO_ON_NORMAL;
-      snprintf(detail, sizeof(detail), "ir_on");
+      // snprintf(detail, sizeof(detail), "ir_on");
     }
     else if (cmdNum == 2)
     {
       executeACCommand(false, 24, "manual_off");
       acAutoState = AUTO_OFF;
-      snprintf(detail, sizeof(detail), "ir_off");
+      // snprintf(detail, sizeof(detail), "ir_off");
     }
     else if (cmdNum >= 3 && cmdNum <= 17)
     {
       int targetTemp = cmdNum + 13;
       executeACCommand(true, targetTemp, "manual_temp");
       acAutoState = AUTO_ON_NORMAL;
-      snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
+      // snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
     }
     else
     {
-      snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
-      publishACK("ir", detail);
+      // snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
+      // publishACK("ir", detail);
     }
     // Note: executeACCommand already publishes an ACK for the IR blast,
     // but keeping this publishACK handles the broader 'ir' topic response
@@ -1417,7 +1417,7 @@ bool processJSON(JsonDocument &doc)
         irsend.send(irProtocol, irCode, bits);
         indicateIRSent();
       }
-      publishACK("protocol_ir", protoStr);
+      // publishACK("protocol_ir", protoStr);
       isValidCommand = true;
     }
   }
@@ -1457,7 +1457,7 @@ void setup_wifi()
     trackPresenceTime();
     if (isAPMode)
       return; // Escape to AP mode immediately if pressed
-    delay(500);
+    delay(100);
     Serial.print(".");
   }
   Serial.println("\nWiFi Connected!");
@@ -1697,34 +1697,34 @@ void sendAutomationEvent(String eventCode)
 int batteryPercentage() { return 80; }
 
 // Sends {"id":{"ack":"ok","action":"...","detail":"..."}} via WiFi MQTT or GSM.
-void publishACK(const char *action, const char *detail)
-{
-  JsonDocument doc;
-  String id = switch_gsm_wifi ? device_id : gsmClientId;
-  JsonObject obj = doc[id].to<JsonObject>();
-  obj["ack"] = "ok";
-  obj["action"] = action;
-  obj["detail"] = detail;
-  char buf[256];
-  serializeJson(doc, buf);
+// void publishACK(const char *action, const char *detail)
+// {
+//   JsonDocument doc;
+//   String id = switch_gsm_wifi ? device_id : gsmClientId;
+//   JsonObject obj = doc[id].to<JsonObject>();
+//   obj["ack"] = "ok";
+//   obj["action"] = action;
+//   obj["detail"] = detail;
+//   char buf[256];
+//   serializeJson(doc, buf);
 
-  if (switch_gsm_wifi)
-  {
-    if (client.connected())
-      client.publish(mqttTopic.c_str(), buf);
-  }
-  else
-  {
-    String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
-    String resp = sendAT(cmd, 3000);
-    if (resp.indexOf(">") != -1)
-    {
-      SerialAT.print(buf);
-      SerialAT.write(0x1A);
-    }
-  }
-  Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
-}
+//   if (switch_gsm_wifi)
+//   {
+//     if (client.connected())
+//       client.publish(mqttTopic.c_str(), buf);
+//   }
+//   else
+//   {
+//     String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
+//     String resp = sendAT(cmd, 3000);
+//     if (resp.indexOf(">") != -1)
+//     {
+//       SerialAT.print(buf);
+//       SerialAT.write(0x1A);
+//     }
+//   }
+//   Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
+// }
 
 void sensorLoop()
 {
@@ -1788,7 +1788,7 @@ void sensorLoop()
   }
 }
 
-// Sends a small alert JSON to whichever transport is active (WiFi or GSM).
+// Sends a small alert JSON to whichever transport is active (WiFi or GSM).//redundant
 void publishHealthAlert(const char *event, const char *detail)
 {
   JsonDocument doc;
@@ -2485,7 +2485,7 @@ void handleScheduleCommand(JsonDocument &doc)
   indicateSuccess();
 
   // Dynamically change the ACK message so the dashboard knows it was deleted vs updated
-  publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
+  // publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
 }
 
 // Called every loop iteration. Fires at segment boundaries (minute resolution).
@@ -2532,11 +2532,11 @@ void scheduleLoop()
       else
       {
         // ---> FIX: Ensure hardware blinks and cloud is notified on specific IR success! <---
-        indicateIRSent(); 
-        char detail[32];
-        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
-        publishACK("boot_schedule_on", detail);
-        lastCommandTime = millis(); 
+        indicateIRSent();
+        // char detail[32];
+        // snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+        // publishACK("boot_schedule_on", detail);
+        lastCommandTime = millis();
       }
       acAutoState = AUTO_ON_NORMAL;
       Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
@@ -2590,9 +2590,9 @@ void scheduleLoop()
       {
         // ---> NEW: If specific schedule IR succeeds, we MUST notify the cloud! <---
         indicateIRSent();
-        char detail[32];
-        snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
-        publishACK("schedule_on", detail);
+        // char detail[32];
+        // snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
+        // publishACK("schedule_on", detail);
         lastCommandTime = millis(); // Reset the 15-min enforcer clock here too!
       }
       acAutoState = AUTO_ON_NORMAL;

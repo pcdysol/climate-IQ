@@ -92,6 +92,22 @@ struct ScheduleSegment
 bool switch_gsm_wifi; // Will be set dynamically from memory
 bool isAPMode = false;
 
+// ===== Non-Blocking Connection State (NEW) =====
+// Replace blocking while-loops with backoff-driven retries so core logic (radar,
+// schedule, automation) keeps running while network is down.
+unsigned long lastWifiRetry = 0;
+unsigned long wifiBackoffMs = 5000;       // doubles up to MAX_BACKOFF_MS
+unsigned long lastMqttRetry = 0;
+unsigned long mqttBackoffMs = 5000;
+const unsigned long MAX_BACKOFF_MS = 300000; // 5 min cap
+bool ntpSyncedThisBoot = false;           // tracks whether time is trustworthy from NTP
+
+// NEW: Cached flag — true if at least one schedule segment exists in NVS for any day.
+// When false (fresh device, all schedules cleared), radar runs unconditionally so the
+// device "just works" out of the box without requiring any schedule setup.
+// Refreshed at boot and whenever a schedule is saved/cleared.
+bool hasAnySchedule = false;
+
 // ===== Hardware Configuration =====
 #define BUTTON_PIN 26
 #define LED_PIN 2
@@ -194,21 +210,32 @@ uint8_t loadSegmentCount(int wday);
 bool loadSegment(int wday, int idx, ScheduleSegment &out);
 int findSegmentTemp(int wday, int minute);
 bool processJSON(JsonDocument &doc);
-// void publishACK(const char *action, const char *detail);
+void publishACK(const char *action, const char *detail);
 void applySegmentRadar(uint8_t radarSetting);
 void applySegmentParams(const ScheduleSegment &seg);
 bool findSegment(int wday, int minute, ScheduleSegment &out);
 bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b);
+void saveLastKnownTime();
+void restoreLastKnownTime();
+void enforceACState();
+void refreshHasAnySchedule(); // NEW: re-scans NVS to refresh the cached flag
 
 // ===== Non-Blocking Delay for Responsiveness =====
 // Replaces standard delay() in blocking loops so the button always works.
+// NEW: Now also services the radar (sensorLoop) so the LD2410 UART buffer
+// can't accumulate frames during multi-second waits in GSM boot etc.
+// At ~10Hz/45-byte-frames the radar produces ~45 bytes per 100ms, so a 50ms
+// service interval keeps the 512-byte buffer drained with a wide safety margin.
 void smartDelay(unsigned long ms)
 {
   unsigned long start = millis();
   while (millis() - start < ms)
   {
     handleButton();
-    updateLED(); // <--- ADD THIS HERE
+    updateLED();
+    sensorLoop();          // NEW: drain LD2410 UART, update cachedPresence
+    trackPresenceTime();   // NEW: keep occupancy accounting accurate
+    esp_task_wdt_reset();  // NEW: long delays must not trip the 120s watchdog
     if (isAPMode)
       break; // Break out immediately if AP mode is triggered
     delay(50);
@@ -1236,12 +1263,12 @@ void executeACCommand(bool turnOn, int targetTemp, const char *triggerSource)
   indicateIRSent();
 
   // 4. Send the MQTT ACK to the cloud
-  // char detail[64];
-  // snprintf(detail, sizeof(detail), "state=%s,temp=%d", turnOn ? "ON" : "OFF", targetTemp);
-  // publishACK(triggerSource, detail);
+  char detail[64];
+  snprintf(detail, sizeof(detail), "state=%s,temp=%d", turnOn ? "ON" : "OFF", targetTemp);
+  publishACK(triggerSource, detail);
 
   // 5. Log to Serial
-  // Serial.printf("[%s] IR Transmitted: %s\n", triggerSource, detail);
+  Serial.printf("[%s] IR Transmitted: %s\n", triggerSource, detail);
 }
 
 bool processJSON(JsonDocument &doc)
@@ -1258,7 +1285,7 @@ bool processJSON(JsonDocument &doc)
   {
     String radarStr = doc["radar"].as<String>();
     Serial.println("Received Radar Value: " + radarStr);
-    // const char *detail = "unchanged";
+    const char *detail = "unchanged";
 
     if (radarStr == "0100" || radarStr == "256")
     {
@@ -1270,7 +1297,7 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: ENABLED");
         indicateSuccess();
       }
-      // detail = "enabled";
+      detail = "enabled";
     }
     else if (radarStr == "0200" || radarStr == "512")
     {
@@ -1281,13 +1308,13 @@ bool processJSON(JsonDocument &doc)
         Serial.println("Radar Automation: DISABLED");
         indicateSuccess();
       }
-      // detail = "disabled";
+      detail = "disabled";
     }
     radarManualOverride = true;
     radarManualValue = radarAutoMode;
     preferences.putBool("rad_ovr", true);
     preferences.putBool("rad_ovr_v", radarAutoMode);
-    // publishACK("radar", detail);
+    publishACK("radar", detail);
     isValidCommand = true;
   }
 
@@ -1303,9 +1330,9 @@ bool processJSON(JsonDocument &doc)
     else
     {
       // ONLY send this if executeACCommand didn't just send one!
-      // char detail[32];
-      // snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
-      // publishACK("temperature_setting", detail);
+      char detail[32];
+      snprintf(detail, sizeof(detail), "temp=%d", currentNormalTemp);
+      publishACK("temperature_setting", detail);
     }
     isValidCommand = true;
   }
@@ -1321,9 +1348,9 @@ bool processJSON(JsonDocument &doc)
     }
     else
     {
-      // char detail[32];
-      // snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
-      // publishACK("eco", detail);
+      char detail[32];
+      snprintf(detail, sizeof(detail), "eco_temp=%d", TEcoTemp);
+      publishACK("eco", detail);
     }
     isValidCommand = true;
   }
@@ -1333,9 +1360,9 @@ bool processJSON(JsonDocument &doc)
     TEcoTime = doc["teco"].as<unsigned long>() * 60000;
     preferences.putULong("eco_time", TEcoTime);
     Serial.printf("Updated TEcoTime: %lu ms\n", TEcoTime);
-    // char detail[32];
-    // snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
-    // publishACK("teco", detail);
+    char detail[32];
+    snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
+    publishACK("teco", detail);
     isValidCommand = true;
   }
 
@@ -1349,9 +1376,9 @@ bool processJSON(JsonDocument &doc)
     }
     preferences.putULong("off_time", TOffTime);
     Serial.printf("Updated TOffTime: %lu ms\n", TOffTime);
-    // char detail[32];
-    // snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
-    // publishACK("toff", detail);
+    char detail[32];
+    snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
+    publishACK("toff", detail);
     isValidCommand = true;
   }
 
@@ -1359,31 +1386,31 @@ bool processJSON(JsonDocument &doc)
   {
     int cmdNum = doc["ir"].as<int>();
     Serial.printf("Received IR Command Code: %d\n", cmdNum);
-    // char detail[32];
+    char detail[32];
 
     if (cmdNum == 1)
     {
       executeACCommand(true, currentNormalTemp, "manual_on");
       acAutoState = AUTO_ON_NORMAL;
-      // snprintf(detail, sizeof(detail), "ir_on");
+      snprintf(detail, sizeof(detail), "ir_on");
     }
     else if (cmdNum == 2)
     {
       executeACCommand(false, 24, "manual_off");
       acAutoState = AUTO_OFF;
-      // snprintf(detail, sizeof(detail), "ir_off");
+      snprintf(detail, sizeof(detail), "ir_off");
     }
     else if (cmdNum >= 3 && cmdNum <= 17)
     {
       int targetTemp = cmdNum + 13;
       executeACCommand(true, targetTemp, "manual_temp");
       acAutoState = AUTO_ON_NORMAL;
-      // snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
+      snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
     }
     else
     {
-      // snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
-      // publishACK("ir", detail);
+      snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
+      publishACK("ir", detail);
     }
     // Note: executeACCommand already publishes an ACK for the IR blast,
     // but keeping this publishACK handles the broader 'ir' topic response
@@ -1448,15 +1475,33 @@ void setup_wifi()
   currentSysState = SYS_WIFI_CONN; // <--- ADD THIS LINE (Trying to connect)
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);   // NEW: let WiFi stack auto-retry in background
+  WiFi.persistent(true);         // NEW: persist credentials to flash
   WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+
+  // NEW: Boot-time WiFi wait is now bounded. If we can't connect in 20s,
+  // continue boot offline. The main loop() will keep retrying with backoff,
+  // and the device will operate fully on local logic in the meantime.
+  const unsigned long WIFI_BOOT_TIMEOUT = 20000;
+  unsigned long start = millis();
+
   while (WiFi.status() != WL_CONNECTED)
   {
+    esp_task_wdt_reset();
     handleButton();
-    sensorLoop();     // KEEP RADAR ALIVE
-    automationLoop(); // KEEP AUTOMATION ALIVE
+    sensorLoop();      // KEEP RADAR ALIVE
+    automationLoop();  // KEEP AUTOMATION ALIVE
     trackPresenceTime();
+    scheduleLoop();    // NEW: keep schedule alive (no-op until time is set)
+    healthLoop();      // NEW: keep radar/HDC self-recovery alive
+    enforceACState();  // NEW: keep AC enforcement alive
     if (isAPMode)
       return; // Escape to AP mode immediately if pressed
+    if (millis() - start > WIFI_BOOT_TIMEOUT)
+    {
+      Serial.println("\n[WIFI] Boot timeout — continuing offline. Will retry in background.");
+      return; // Setup proceeds; loop() handles reconnection.
+    }
     delay(100);
     Serial.print(".");
   }
@@ -1468,51 +1513,54 @@ void setup_wifi()
 
 void reconnect()
 {
-  while (!client.connected())
+  // NEW: SINGLE-SHOT non-blocking attempt. Caller (loop) handles retry timing
+  // via mqttBackoffMs. This prevents the device from freezing core logic when
+  // the broker is unreachable.
+  if (isAPMode)
+    return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+  if (client.connected())
+    return;
+
+  handleButton();
+  Serial.print("Connecting to MQTT...");
+  String lwtTopic = "/status/" + device_id;
+  String lwtMessage = "{\"status\": \"Offline\", \"reason\": \"Connection Lost\"}";
+
+  // Connect with LWT: (ClientID, Username, Password, LWT Topic, QoS, Retain, LWT Message)
+  if (client.connect(device_id.c_str(), NULL, NULL, lwtTopic.c_str(), 1, true, lwtMessage.c_str()))
   {
-    handleButton();
-    if (isAPMode)
-      return; // Escape to AP mode immediately if pressed
+    Serial.println("connected!");
 
-    Serial.print("Connecting to MQTT...");
-    // Inside reconnect() for WiFi:
-    String lwtTopic = "/status/" + device_id;
-    String lwtMessage = "{\"status\": \"Offline\", \"reason\": \"Connection Lost\"}";
+    // Immediately publish an "Online" message to overwrite any previous Offline state
+    String onlineMsg = "{\"status\": \"Online\", \"reason\": \"Connected\"}";
+    client.publish(lwtTopic.c_str(), onlineMsg.c_str(), true); // Retained message
 
-    // Connect with LWT: (ClientID, Username, Password, LWT Topic, QoS, Retain, LWT Message)
-    if (client.connect(device_id.c_str(), NULL, NULL, lwtTopic.c_str(), 1, true, lwtMessage.c_str()))
+    client.subscribe(mqttTopic.c_str());
+
+    // One-time boot alert: sends immediately on first connect, not buried in telemetry
+    static bool bootAlertSent = false;
+    if (!bootAlertSent)
     {
-      Serial.println("connected!");
-
-      // Immediately publish an "Online" message to overwrite any previous Offline state
-      String onlineMsg = "{\"status\": \"Online\", \"reason\": \"Connected\"}";
-      client.publish(lwtTopic.c_str(), onlineMsg.c_str(), true); // Retained message
-
-      client.subscribe(mqttTopic.c_str());
-
-      // One-time boot alert: sends immediately on first connect, not buried in telemetry
-      static bool bootAlertSent = false;
-      if (!bootAlertSent)
-      {
-        JsonDocument bootDoc;
-        JsonObject bd = bootDoc[device_id].to<JsonObject>();
-        bd["event"] = "boot";
-        bd["reset_reason"] = getResetReason();
-        bd["hdc_init"] = hdcInitFailed ? "FAILED" : "OK";
-        bd["radar_init"] = radarInitFailed ? "FAILED" : "OK";
-        char bootBuf[256];
-        serializeJson(bootDoc, bootBuf);
-        client.publish(mqttTopic.c_str(), bootBuf);
-        bootAlertSent = true;
-        Serial.println("[BOOT] Boot alert sent via MQTT.");
-      }
+      JsonDocument bootDoc;
+      JsonObject bd = bootDoc[device_id].to<JsonObject>();
+      bd["event"] = "boot";
+      bd["reset_reason"] = getResetReason();
+      bd["hdc_init"] = hdcInitFailed ? "FAILED" : "OK";
+      bd["radar_init"] = radarInitFailed ? "FAILED" : "OK";
+      char bootBuf[256];
+      serializeJson(bootDoc, bootBuf);
+      client.publish(mqttTopic.c_str(), bootBuf);
+      bootAlertSent = true;
+      Serial.println("[BOOT] Boot alert sent via MQTT.");
     }
-    else
-    {
-      Serial.print("failed, rc=");
-      Serial.println(client.state());
-      smartDelay(5000); // Replaced standard delay so button stays responsive
-    }
+  }
+  else
+  {
+    Serial.print("failed, rc=");
+    Serial.println(client.state());
+    // NEW: no smartDelay here — loop()'s mqttBackoffMs handles spacing.
   }
 }
 
@@ -1697,34 +1745,69 @@ void sendAutomationEvent(String eventCode)
 int batteryPercentage() { return 80; }
 
 // Sends {"id":{"ack":"ok","action":"...","detail":"..."}} via WiFi MQTT or GSM.
-// void publishACK(const char *action, const char *detail)
-// {
-//   JsonDocument doc;
-//   String id = switch_gsm_wifi ? device_id : gsmClientId;
-//   JsonObject obj = doc[id].to<JsonObject>();
-//   obj["ack"] = "ok";
-//   obj["action"] = action;
-//   obj["detail"] = detail;
-//   char buf[256];
-//   serializeJson(doc, buf);
+void publishACK(const char *action, const char *detail)
+{
+  JsonDocument doc;
+  String id = switch_gsm_wifi ? device_id : gsmClientId;
+  JsonObject obj = doc[id].to<JsonObject>();
+  obj["ack"] = "ok";
+  obj["action"] = action;
+  obj["detail"] = detail;
+  char buf[256];
+  serializeJson(doc, buf);
 
-//   if (switch_gsm_wifi)
-//   {
-//     if (client.connected())
-//       client.publish(mqttTopic.c_str(), buf);
-//   }
-//   else
-//   {
-//     String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
-//     String resp = sendAT(cmd, 3000);
-//     if (resp.indexOf(">") != -1)
-//     {
-//       SerialAT.print(buf);
-//       SerialAT.write(0x1A);
-//     }
-//   }
-//   Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
-// }
+  if (switch_gsm_wifi)
+  {
+    if (client.connected())
+      client.publish(mqttTopic.c_str(), buf);
+  }
+  else
+  {
+    String cmd = "AT+QMTPUB=0,1,1,0,\"" + pubTopic + "\"";
+    String resp = sendAT(cmd, 3000);
+    if (resp.indexOf(">") != -1)
+    {
+      SerialAT.print(buf);
+      SerialAT.write(0x1A);
+    }
+  }
+  Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
+}
+
+// ====================================================================
+// ============== TIME PERSISTENCE FOR OFFLINE SCHEDULER ==============
+// ====================================================================
+// Without these helpers, the scheduler is dead until NTP succeeds (or GSM
+// CCLK syncs). With them, even a power loss followed by a network outage
+// keeps the scheduler running with up to ~1-2s/day of drift — acceptable
+// for minute-resolution segment scheduling.
+
+void saveLastKnownTime()
+{
+  time_t now;
+  time(&now);
+  // Sanity gate: only persist if clock is post-2023 (i.e. actually synced).
+  if (now > 1700000000)
+  {
+    preferences.putULong("last_time", (unsigned long)now);
+    Serial.printf("[TIME] Saved to NVS: %lu\n", (unsigned long)now);
+  }
+}
+
+void restoreLastKnownTime()
+{
+  unsigned long savedTime = preferences.getULong("last_time", 0);
+  if (savedTime > 1700000000)
+  {
+    struct timeval tv = {(time_t)savedTime, 0};
+    settimeofday(&tv, nullptr);
+    Serial.printf("[TIME] Restored from NVS: %lu (offline drift expected)\n", savedTime);
+  }
+  else
+  {
+    Serial.println("[TIME] No saved time available — scheduler will wait for NTP/GSM.");
+  }
+}
 
 void sensorLoop()
 {
@@ -1821,8 +1904,19 @@ void publishHealthAlert(const char *event, const char *detail)
 void healthLoop()
 {
   static unsigned long lastHealthCheck = 0;
-  const unsigned long HEALTH_INTERVAL = 30000; // check every 30 seconds
-  const uint32_t HEAP_WARN_BYTES = 12000;      // alert below 12 KB free
+  static unsigned long lastTimeSave = 0;
+  const unsigned long HEALTH_INTERVAL = 30000;     // check every 30 seconds
+  const unsigned long TIME_SAVE_INTERVAL = 600000; // persist clock every 10 minutes
+  const uint32_t HEAP_WARN_BYTES = 12000;          // alert below 12 KB free
+
+  // NEW: Persist the system clock to NVS periodically. On any future boot
+  // (with or without network), restoreLastKnownTime() can seed the clock
+  // close enough to keep the schedule running.
+  if (millis() - lastTimeSave >= TIME_SAVE_INTERVAL)
+  {
+    lastTimeSave = millis();
+    saveLastKnownTime();
+  }
 
   if (millis() - lastHealthCheck < HEALTH_INTERVAL)
     return;
@@ -2041,15 +2135,48 @@ void calibrateRadarReset()
 
 void automationLoop()
 {
-  // ---> NEW: Radar is strictly disabled if outside scheduling hours!
-  if (!radarAutoMode || !sensorReady || !isInsideSchedule)
+  // Radar is no longer hard-gated by schedule. It runs whenever radarAutoMode
+  // is enabled and the sensor is alive. The interaction with the schedule is now:
+  //
+  //   - No schedule configured anywhere (hasAnySchedule == false):
+  //       Radar runs UNCONDITIONALLY — this is the "just works" default for a
+  //       fresh device or one where the user cleared all schedules.
+  //   - Inside a schedule segment: scheduleLoop() sets currentNormalTemp from the
+  //     segment, and radar uses it as the "presence" target temp.
+  //   - Outside any segment (but schedule exists): behavior depends on
+  //     radar_out_pol stored in NVS:
+  //       0 = OFF      — radar dormant outside schedule (legacy strict behavior)
+  //       1 = RADAR    — radar takes over with currentNormalTemp as fallback
+  //       2 = MANUAL   — radar dormant; only explicit MQTT/button commands act
+  //
+  // Set the policy via MQTT or dashboard; persists across reboots.
+  if (!radarAutoMode || !sensorReady)
     return;
+
+  // NEW: If no schedule is configured at all, OR the system clock is invalid
+  // (no NTP, no NVS-restored time), radar should still run. Otherwise the
+  // device would sit idle forever offline with no way to recover.
+  struct tm tinfo;
+  bool clockValid = getLocalTime(&tinfo);
+
+  if (hasAnySchedule && clockValid)
+  {
+    // Schedule exists and we know the time — apply policy when outside segments.
+    if (!isInsideSchedule)
+    {
+      uint8_t policy = preferences.getUChar("radar_out_pol", 0);
+      if (policy != 1)
+        return; // OFF or MANUAL — don't drive AC outside schedule
+      // policy == 1 (RADAR-ONLY): fall through using currentNormalTemp as target.
+    }
+  }
+  // else: no schedule OR clock invalid — fall through to radar logic unconditionally.
 
   if (cachedPresence)
   {
     lastPresenceTime = millis();
 
-    // If someone enters and it's not in normal mode, turn it ON to 24°C
+    // If someone enters and it's not in normal mode, turn it ON to currentNormalTemp
     if (acAutoState != AUTO_ON_NORMAL)
     {
       executeACCommand(true, currentNormalTemp, "radar_presence");
@@ -2152,6 +2279,25 @@ uint8_t loadSegmentCount(int wday)
   char key[13];
   snprintf(key, sizeof(key), "sch_cnt_%d", wday);
   return preferences.getUChar(key, 0);
+}
+
+// NEW: Scans all 7 days for any configured segment. Updates the cached flag
+// `hasAnySchedule` so automationLoop() can do an O(1) check every iteration
+// instead of hitting NVS 7 times per loop tick.
+// Call at boot, after any schedule save, and after schedule clear.
+void refreshHasAnySchedule()
+{
+  for (int d = 0; d < 7; d++)
+  {
+    if (loadSegmentCount(d) > 0)
+    {
+      hasAnySchedule = true;
+      Serial.println("[SCHED] hasAnySchedule = true (at least one day configured)");
+      return;
+    }
+  }
+  hasAnySchedule = false;
+  Serial.println("[SCHED] hasAnySchedule = false (no segments — radar runs unconditionally)");
 }
 
 bool loadSegment(int wday, int idx, ScheduleSegment &out)
@@ -2469,6 +2615,9 @@ void handleScheduleCommand(JsonDocument &doc)
   // Passing a count of 0 overwrites the NVS memory for this day to zero segments
   saveSchedule(wday, segs, count, irHex, irTemp);
 
+  // NEW: schedule landscape changed — refresh the cached "any schedule exists?" flag.
+  refreshHasAnySchedule();
+
   // New schedule is authoritative — clear manual radar override
   radarManualOverride = false;
   preferences.putBool("rad_ovr", false);
@@ -2485,7 +2634,7 @@ void handleScheduleCommand(JsonDocument &doc)
   indicateSuccess();
 
   // Dynamically change the ACK message so the dashboard knows it was deleted vs updated
-  // publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
+  publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
 }
 
 // Called every loop iteration. Fires at segment boundaries (minute resolution).
@@ -2533,9 +2682,9 @@ void scheduleLoop()
       {
         // ---> FIX: Ensure hardware blinks and cloud is notified on specific IR success! <---
         indicateIRSent();
-        // char detail[32];
-        // snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
-        // publishACK("boot_schedule_on", detail);
+        char detail[32];
+        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+        publishACK("boot_schedule_on", detail);
         lastCommandTime = millis();
       }
       acAutoState = AUTO_ON_NORMAL;
@@ -2590,9 +2739,9 @@ void scheduleLoop()
       {
         // ---> NEW: If specific schedule IR succeeds, we MUST notify the cloud! <---
         indicateIRSent();
-        // char detail[32];
-        // snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
-        // publishACK("schedule_on", detail);
+        char detail[32];
+        snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
+        publishACK("schedule_on", detail);
         lastCommandTime = millis(); // Reset the 15-min enforcer clock here too!
       }
       acAutoState = AUTO_ON_NORMAL;
@@ -2611,9 +2760,9 @@ void scheduleLoop()
     // Leaving a segment (gap between segments or all segments ended for the day).
     executeACCommand(false, 24, "schedule_off");
     acAutoState = AUTO_OFF;
-    // --> NEW FIX: Force radar automation OFF so it doesn't trigger after hours
-    radarAutoMode = false;
-    preferences.putBool("radar_auto", false);
+    // NEW: We no longer force radarAutoMode = false here. Radar now stays in
+    // whatever state the user / MQTT set it to. automationLoop() consults
+    // 'radar_out_pol' to decide whether to act outside schedule.
     Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
                   timeinfo.tm_hour, timeinfo.tm_min);
   }
@@ -2665,6 +2814,10 @@ void setup()
   lastScheduledMin = -1; // force scheduleLoop() to fire on first valid tick after boot
   lastScheduledWday = -1;
   lastPresenceTime = millis(); // defensive: prevents emptyDuration from being huge if acAutoState guard is ever removed
+
+  // NEW: Determine whether any schedule exists across all 7 days. If not,
+  // automationLoop() will run radar unconditionally (the "fresh device" default).
+  refreshHasAnySchedule();
 
   Serial.printf("\n[BOOT] Loaded Automation Settings:\n - Eco Temp: %d°C\n - Eco Time: %lu ms\n - Off Time: %lu ms\n", TEcoTemp, TEcoTime, TOffTime);
 
@@ -2839,10 +2992,34 @@ void setup()
       {
         configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
         struct tm timeinfo;
-        while (!getLocalTime(&timeinfo))
+        // NEW: Bounded NTP wait. Don't block setup forever if NTP is unreachable
+        // (firewall, captive portal, broken DNS). Fall back to last-known time from NVS.
+        unsigned long ntpStart = millis();
+        const unsigned long NTP_TIMEOUT = 8000;
+        while (!getLocalTime(&timeinfo) && (millis() - ntpStart < NTP_TIMEOUT))
         {
-          delay(500);
+          esp_task_wdt_reset();
+          handleButton();
+          sensorLoop();
+          delay(200);
         }
+        if (getLocalTime(&timeinfo))
+        {
+          Serial.println("[NTP] Time sync OK.");
+          ntpSyncedThisBoot = true;
+          saveLastKnownTime();
+        }
+        else
+        {
+          Serial.println("[NTP] Time sync timed out — using NVS fallback if available.");
+          restoreLastKnownTime();
+        }
+      }
+      else
+      {
+        // WiFi never came up at boot — use NVS time so scheduler can still operate offline.
+        Serial.println("[BOOT] WiFi offline — restoring last-known time from NVS.");
+        restoreLastKnownTime();
       }
 
       client.setBufferSize(512); // <--- ADD THIS LINE to prevent silent packet drops
@@ -2953,9 +3130,9 @@ void setup()
           {
             Serial.println("\nMAX RETRIES — Restarting modem via AT+CFUN...");
             sendAT("AT+CFUN=0", 5000);
-            delay(3000);
+            smartDelay(3000);
             sendAT("AT+CFUN=1", 5000);
-            delay(10000);
+            smartDelay(10000);
             connFailCount = 0;
             Serial.println("Modem restarted. Retrying...\n");
           }
@@ -2971,7 +3148,7 @@ void setup()
         // ----- STEP 5: Open MQTT Connection -----
         Serial.println("\n[STEP 5] Opening MQTT Connection...");
         sendAT("AT+QMTCLOSE=0", 3000);
-        delay(1000);
+        smartDelay(1000);
 
         // GSM LWT — must use a quote-free will message; Quectel AT parsers do not support
         // backslash escaping inside string parameters, so JSON with internal quotes is rejected.
@@ -3015,15 +3192,15 @@ void setup()
           {
             Serial.println("\n⚠⚠⚠ MAX RETRIES — Restarting modem...");
             sendAT("AT+CFUN=0", 5000);
-            delay(3000);
+            smartDelay(3000);
             sendAT("AT+CFUN=1", 5000);
-            delay(10000);
+            smartDelay(10000);
             connFailCount = 0;
           }
           continue;
         }
 
-        delay(2000);
+        smartDelay(2000);
 
         // ----- STEP 6: MQTT CONNECT -----
         Serial.println("\n[STEP 6] Logging into MQTT Broker...");
@@ -3068,23 +3245,23 @@ void setup()
           {
             Serial.println("\n⚠⚠⚠ 3 FAILURES — RESTARTING MODEM ⚠⚠⚠");
             sendAT("AT+QMTCLOSE=0", 3000);
-            delay(1000);
+            smartDelay(1000);
             sendAT("AT+CFUN=0", 5000);
-            delay(3000);
+            smartDelay(3000);
             sendAT("AT+CFUN=1", 5000);
-            delay(10000);
+            smartDelay(10000);
             connFailCount = 0;
           }
           else
           {
-            delay(3000);
+            smartDelay(3000);
           }
         }
       } // end while
 
       if (mqttConnected)
       {
-        delay(2000);
+        smartDelay(2000);
         Serial.println("\n[STEP 7] Subscribing to Topic...");
         String cmd = "AT+QMTSUB=0,1,\"" + subTopic + "\",0";
         sendAT(cmd, 5000);
@@ -3169,40 +3346,67 @@ void loop()
   if (switch_gsm_wifi)
   {
     // --- WiFi / MQTT Routine ---
+    // NEW: Non-blocking reconnect. Core logic above (sensor/automation/schedule/health/
+    // enforcement) has ALREADY run this iteration regardless of network status.
+    // We never block here — failed network just means we skip MQTT publish this tick.
     if (WiFi.status() != WL_CONNECTED)
     {
-      currentSysState = SYS_WIFI_CONN; // <--- ADD THIS LINE (Lost connection)
-      Serial.println("\nWiFi connection lost! Reconnecting...");
-      WiFi.disconnect();
-      WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
-
-      int abc = 0;
-      while (WiFi.status() != WL_CONNECTED)
+      if (currentSysState != SYS_WIFI_CONN)
       {
-        esp_task_wdt_reset();
-        handleButton();
-        sensorLoop();     // KEEP RADAR ALIVE
-        automationLoop(); // KEEP AUTOMATION ALIVE
-        trackPresenceTime();
-        if (isAPMode)
-          return; // Exit loop immediately if button pressed
+        currentSysState = SYS_WIFI_CONN;
+        Serial.println("\n[WIFI] Connection lost — running offline. Background retry active.");
+      }
+      if (millis() - lastWifiRetry >= wifiBackoffMs)
+      {
+        lastWifiRetry = millis();
+        Serial.printf("[WIFI] Retry attempt (next in ~%lus if this fails)\n", wifiBackoffMs / 1000);
+        WiFi.disconnect();
+        WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+        // Exponential backoff: 5s -> 10s -> 20s -> ... -> 5min cap
+        wifiBackoffMs = min(wifiBackoffMs * 2, MAX_BACKOFF_MS);
+      }
+      // Skip MQTT and telemetry while WiFi is down. Critical loops already ran.
+      return;
+    }
 
-        delay(500);
-        Serial.print(".");
-        if (abc++ > 20)
+    // WiFi just came back up?
+    if (currentSysState == SYS_WIFI_CONN)
+    {
+      Serial.println("\n[WIFI] Reconnected!");
+      currentSysState = SYS_WIFI_OK;
+      wifiBackoffMs = 5000; // reset backoff on success
+      // Opportunistically re-sync time (not required for schedule, since NVS fallback works).
+      if (!ntpSyncedThisBoot)
+      {
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        struct tm tinfo;
+        if (getLocalTime(&tinfo))
         {
-          WiFi.disconnect();
-          WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
-          smartDelay(2000); // Replaced standard delay
-          abc = 0;
+          ntpSyncedThisBoot = true;
+          saveLastKnownTime();
+          Serial.println("[NTP] Late time sync OK.");
         }
       }
-      Serial.println("\nWiFi Reconnected!");
-      currentSysState = SYS_WIFI_OK;
     }
 
     if (!client.connected())
-      reconnect();
+    {
+      if (millis() - lastMqttRetry >= mqttBackoffMs)
+      {
+        lastMqttRetry = millis();
+        reconnect(); // single-shot
+        if (client.connected())
+        {
+          mqttBackoffMs = 5000; // reset on success
+        }
+        else
+        {
+          mqttBackoffMs = min(mqttBackoffMs * 2, MAX_BACKOFF_MS);
+        }
+      }
+      // Skip telemetry this tick if MQTT still down.
+      return;
+    }
     client.loop();
 
     if (millis() - lastTelemetry > TELEMETRY_INTERVAL)

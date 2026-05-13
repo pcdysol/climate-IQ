@@ -12,13 +12,59 @@ namespace CommandProcessor {
 
     bool processJSON(JsonDocument &doc) {
         bool isValidCommand = false;
+        
+        // Extract the main command key sent by the backend
+        String cmd = doc["command"].as<String>();
 
-        if (doc["command"] == "temperature_control" && doc["segments"]) {
-            ScheduleManager::handleScheduleCommand(doc); 
-            return true;
+        // =========================================================
+        // 1. TEMPERATURE CONTROL OR SCHEDULE
+        // =========================================================
+        if (cmd == "temperature_control") {
+            if (doc["segments"]) {
+                // It is a Schedule update
+                ScheduleManager::handleScheduleCommand(doc); 
+                isValidCommand = true;
+            } else {
+                // It is a Manual Temperature change
+                if (doc["temperature_setting"]) {
+                    sysData.currentNormalTemp = doc["temperature_setting"].as<int>();
+                    preferences.putInt("normal_temp", sysData.currentNormalTemp);
+                }
+                
+                // Blast the IR code (using the backend 'ir' code if provided)
+                if (doc["ir"]) {
+                    int cmdNum = doc["ir"].as<int>();
+                    // Convert cmdNum to actual temp based on your old logic, or just use the setting directly
+                    int targetTemp = (cmdNum >= 3 && cmdNum <= 17) ? (cmdNum + 13) : sysData.currentNormalTemp;
+                    AutomationManager::executeACCommand(true, targetTemp, "manual_temp");
+                } else {
+                    // Fallback to sending the temperature setting directly if 'ir' is missing
+                    AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_temp");
+                }
+                
+                sysData.acAutoState = AUTO_ON_NORMAL;
+                isValidCommand = true;
+            }
         }
-
-        if (doc["radar"]) {
+        // =========================================================
+        // 2. POWER CONTROL (ON / OFF)
+        // =========================================================
+        else if (cmd == "power_control") {
+            bool turnOn = doc["power_status"].as<bool>();
+            
+            if (turnOn) {
+                AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_on");
+                sysData.acAutoState = AUTO_ON_NORMAL;
+            } else {
+                AutomationManager::executeACCommand(false, 24, "manual_off");
+                sysData.acAutoState = AUTO_OFF;
+            }
+            isValidCommand = true;
+        }
+        // =========================================================
+        // 3. RADAR CONTROL
+        // =========================================================
+        else if (cmd == "radar_control") {
             String radarStr = doc["radar"].as<String>();
             Serial.println("Received Radar Value: " + radarStr);
             const char *detail = "unchanged";
@@ -41,6 +87,7 @@ namespace CommandProcessor {
                 }
                 detail = "disabled";
             }
+            
             sysData.radarManualOverride = true;
             sysData.radarManualValue = sysData.radarAutoMode;
             preferences.putBool("rad_ovr", true);
@@ -48,83 +95,40 @@ namespace CommandProcessor {
             NetworkManager::publishACK("radar", detail);
             isValidCommand = true;
         }
-
-        if (doc["temperature_setting"]) {
-            sysData.currentNormalTemp = doc["temperature_setting"].as<int>();
-            preferences.putInt("normal_temp", sysData.currentNormalTemp);
-            if (sysData.acAutoState == AUTO_ON_NORMAL) {
-                AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "update_temp");
-            } else {
-                char detail[32];
-                snprintf(detail, sizeof(detail), "temp=%d", sysData.currentNormalTemp);
-                NetworkManager::publishACK("temperature_setting", detail);
-            }
-            isValidCommand = true;
-        }
-
-        if (doc["eco"]) {
-            sysData.currentEcoTemp = doc["eco"].as<int>();
-            preferences.putInt("eco_temp", sysData.currentEcoTemp);
-            if (sysData.acAutoState == AUTO_ON_ECO) {
-                AutomationManager::executeACCommand(true, sysData.currentEcoTemp, "update_eco");
-            } else {
+        // =========================================================
+        // 4. ECO PARAMETERS (Catch-all for variables)
+        // =========================================================
+        else if (doc["eco"] || doc["teco"] || doc["toff"]) {
+            if (doc["eco"]) {
+                sysData.currentEcoTemp = doc["eco"].as<int>();
+                preferences.putInt("eco_temp", sysData.currentEcoTemp);
                 char detail[32];
                 snprintf(detail, sizeof(detail), "eco_temp=%d", sysData.currentEcoTemp);
                 NetworkManager::publishACK("eco", detail);
             }
-            isValidCommand = true;
-        }
-
-        if (doc["teco"]) {
-            sysData.TEcoTime = doc["teco"].as<unsigned long>() * 60000;
-            preferences.putULong("eco_time", sysData.TEcoTime);
-            Serial.printf("Updated TEcoTime: %lu ms\n", sysData.TEcoTime);
-            char detail[32];
-            snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
-            NetworkManager::publishACK("teco", detail);
-            isValidCommand = true;
-        }
-
-        if (doc["toff"]) {
-            sysData.TOffTime = doc["toff"].as<unsigned long>() * 60000;
-            if (sysData.TOffTime <= sysData.TEcoTime) {
-                sysData.TOffTime = sysData.TEcoTime + 60000;
-                Serial.println("WARNING: TOffTime was <= TEcoTime. Auto-corrected.");
+            if (doc["teco"]) {
+                sysData.TEcoTime = doc["teco"].as<unsigned long>() * 60000;
+                preferences.putULong("eco_time", sysData.TEcoTime);
+                char detail[32];
+                snprintf(detail, sizeof(detail), "teco=%lu_min", doc["teco"].as<unsigned long>());
+                NetworkManager::publishACK("teco", detail);
             }
-            preferences.putULong("off_time", sysData.TOffTime);
-            Serial.printf("Updated TOffTime: %lu ms\n", sysData.TOffTime);
-            char detail[32];
-            snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
-            NetworkManager::publishACK("toff", detail);
-            isValidCommand = true;
-        }
-
-        if (doc["ir"]) {
-            int cmdNum = doc["ir"].as<int>();
-            Serial.printf("Received IR Command Code: %d\n", cmdNum);
-            char detail[32];
-
-            if (cmdNum == 1) {
-                AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_on");
-                sysData.acAutoState = AUTO_ON_NORMAL;
-                snprintf(detail, sizeof(detail), "ir_on");
-            } else if (cmdNum == 2) {
-                AutomationManager::executeACCommand(false, 24, "manual_off");
-                sysData.acAutoState = AUTO_OFF;
-                snprintf(detail, sizeof(detail), "ir_off");
-            } else if (cmdNum >= 3 && cmdNum <= 17) {
-                int targetTemp = cmdNum + 13;
-                AutomationManager::executeACCommand(true, targetTemp, "manual_temp");
-                sysData.acAutoState = AUTO_ON_NORMAL;
-                snprintf(detail, sizeof(detail), "ir_temp=%d", targetTemp);
-            } else {
-                snprintf(detail, sizeof(detail), "ir_invalid=%d", cmdNum);
-                NetworkManager::publishACK("ir", detail);
+            if (doc["toff"]) {
+                sysData.TOffTime = doc["toff"].as<unsigned long>() * 60000;
+                if (sysData.TOffTime <= sysData.TEcoTime) {
+                    sysData.TOffTime = sysData.TEcoTime + 60000;
+                }
+                preferences.putULong("off_time", sysData.TOffTime);
+                char detail[32];
+                snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
+                NetworkManager::publishACK("toff", detail);
             }
             isValidCommand = true;
         }
-
-        if (doc["protocol"]) {
+        // =========================================================
+        // 5. DYNAMIC IR PROTOCOL INJECTION
+        // =========================================================
+        else if (doc["protocol"]) {
             const char *protoStr = doc["protocol"];
             bool success = false;
             if (doc["state"]) {

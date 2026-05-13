@@ -32,40 +32,33 @@ bool playCustomButton(const char* storageKey) {
         if (len > 0) {
             uint16_t elements = len / sizeof(uint16_t);
             uint16_t rawData[elements];
-
             preferences.getBytes(storageKey, rawData, len);
-            irsend.sendRaw(rawData, elements, 38);
+
+            // REPLACE the priority logic with this:
+            if (xSemaphoreTake(irMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                // --- FIRST BLAST ---
+                irsend.sendRaw(rawData, elements, 38);
+                
+                // --- NON-BLOCKING DELAY ---
+                // Wait 150ms so the AC receiver can distinguish the two signals
+                vTaskDelay(pdMS_TO_TICKS(150)); 
+                
+                // --- SECOND BLAST ---
+                irsend.sendRaw(rawData, elements, 38);
+
+                xSemaphoreGive(irMutex);
+                Serial.printf("[IR] Sent Custom Signal: %s\n", storageKey);
+                return true;
+            } else {
+                Serial.println("[IR] ERROR: Failed to acquire IR Mutex!");
+            }
+
             Serial.printf("[IR] Sent Custom Signal: %s\n", storageKey);
             return true;
         }
     }
     return false;
 }
-
-// void sendACFallback(bool turnOn, int targetTemp) {
-//     String savedProto = preferences.getString("protocol_name", "");
-//     decode_type_t protocol = decode_type_t::UNKNOWN;
-
-//     if (savedProto != "") {
-//         protocol = strToDecodeType(savedProto.c_str());
-//     }
-
-//     if (protocol == decode_type_t::UNKNOWN) {
-//         Serial.println("[IR] No valid protocol saved, and auto-detection failed. Cannot send AC command.");
-//         Indicator::indicateError(); // Flash error pattern for 3 flashes with 200ms delay
-//         // return;
-//     }
-
-//     ac.next.protocol = protocol;
-//     ac.next.power = turnOn;
-//     ac.next.degrees = targetTemp;
-//     ac.next.mode = stdAc::opmode_t::kCool;
-//     ac.next.fanspeed = stdAc::fanspeed_t::kAuto;
-
-//     ac.sendAc();
-//     Serial.printf("[IR] Sent Universal Signal (%s): %s at %dC\n", 
-//                   savedProto.c_str(), turnOn ? "ON" : "OFF", targetTemp);
-// }
 
 void sendACFallback(bool turnOn, int targetTemp) {
     String savedProto = preferences.getString("protocol_name", "");
@@ -86,38 +79,23 @@ void sendACFallback(bool turnOn, int targetTemp) {
     ac.next.mode = stdAc::opmode_t::kCool;
     ac.next.fanspeed = stdAc::fanspeed_t::kAuto;
 
-    // ========================================================
-    // ================= NEW DEBUG BLOCK ======================
-    // ========================================================
-    Serial.println("\n[IR] Preparing to transmit... Starting self-capture.");
-    
-    // 1. Turn on the receiver to listen to ourselves
-    irrecv.enableIRIn(); 
+    // REPLACE the priority logic with this:
+    if (xSemaphoreTake(irMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        // --- FIRST BLAST ---
+        ac.sendAc();
+        
+        // --- NON-BLOCKING DELAY ---
+        // Wait 150ms so the AC receiver can reset
+        vTaskDelay(pdMS_TO_TICKS(150));
+        
+        // --- SECOND BLAST ---
+        ac.sendAc();
 
-    // 2. Blast the signal
-    ac.sendAc();         
-
-    // 3. Wait for the massive AC signal to finish flying through the air
-    delay(300);          
-
-    // 4. Check if our receiver caught the transmission
-    decode_results results;
-    if (irrecv.decode(&results)) {
-        Serial.println("\n========== IR TRANSMISSION DUMP ==========");
-        Serial.printf("Detected Protocol: %s\n", typeToString(results.decode_type).c_str());
-        Serial.printf("Pulse Count: %d (AC codes should be 100+ pulses)\n", results.rawlen);
-        Serial.println("Raw Timings (Marks and Spaces):");
-        Serial.println(resultToTimingInfo(&results));
-        Serial.println("==========================================");
+        xSemaphoreGive(irMutex);
     } else {
-        Serial.println("\n========== IR TRANSMISSION DUMP ==========");
-        Serial.println("ERROR: NO SIGNAL DETECTED!");
-        Serial.println("The software fired, but the IR LED produced no light/data.");
-        Serial.println("==========================================");
+        Serial.println("[IR] ERROR: Failed to acquire IR Mutex!");
     }
-    irrecv.disableIRIn(); // Turn receiver back off
-    // ========================================================
-
+    
     Serial.printf("[IR] Sent Universal Signal (%s): %s at %dC\n", 
                   typeToString(protocol).c_str(), turnOn ? "ON" : "OFF", targetTemp);
 }
@@ -188,16 +166,24 @@ bool sendDynamicState(const char* protocolStr, uint8_t* stateArray, uint16_t siz
     decode_type_t irProtocol = strToDecodeType(protocolStr);
     if (irProtocol == decode_type_t::UNKNOWN) return false;
     
-    irsend.send(irProtocol, stateArray, size);
-    return true;
+    if (xSemaphoreTake(irMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        irsend.send(irProtocol, stateArray, size);
+        xSemaphoreGive(irMutex);
+        return true;
+    }
+    return false;
 }
 
 bool sendDynamicCode(const char* protocolStr, uint64_t irCode, uint16_t bits) {
     decode_type_t irProtocol = strToDecodeType(protocolStr);
     if (irProtocol == decode_type_t::UNKNOWN) return false;
     
-    irsend.send(irProtocol, irCode, bits);
-    return true;
+    if (xSemaphoreTake(irMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        irsend.send(irProtocol, irCode, bits);
+        xSemaphoreGive(irMutex);
+        return true;
+    }
+    return false;
 }
 
 void wipeMemory() {

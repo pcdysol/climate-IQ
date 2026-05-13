@@ -13,6 +13,8 @@
 static Adafruit_HDC1000 hdc = Adafruit_HDC1000();
 static MyLD2410 radar(sensorSerial);
 static SystemData *globalState = nullptr;
+// Add this near the top of SensorManager.cpp, after the includes
+extern TaskHandle_t sensorsTaskHandle;
 
 // --- Private Variance Filter Variables ---
 static uint8_t statHistory[VARIANCE_SAMPLES];
@@ -71,6 +73,8 @@ namespace SensorManager
         }
         else
         {
+            globalState->radarInitFailed = true;
+            globalState->sensorReady = false;
             Serial.println(" ✗ Failed!");
         }
     }
@@ -102,6 +106,20 @@ namespace SensorManager
             bool rawPresence = radar.presenceDetected();
             uint8_t movingSig = radar.movingTargetSignal();
             uint8_t statSig = radar.stationaryTargetSignal();
+            // --- FLAP DELAY SUPPRESSION ---
+            if (globalState->isFlapDelayActive) {
+                if (millis() - globalState->flapDelayStart < (globalState->flapDelaySec * 1000)) {
+                    // Force the radar values to 0 while the flap is closing
+                    rawPresence = false;
+                    movingSig = 0;
+                    statSig = 0;
+                } else {
+                    // Timer expired, resume normal radar operation
+                    globalState->isFlapDelayActive = false;
+                    Serial.println("[SENSOR] Flap delay expired. Resuming radar detection.");
+                }
+            }
+            // ------------------------------
 
             // Variance Filter
             if (rawPresence && statSig > 0)
@@ -138,7 +156,19 @@ namespace SensorManager
                 isVarianceNoise = false;
             }
 
-            globalState->cachedPresence = isVarianceNoise ? false : rawPresence;
+            if (isVarianceNoise ? false : rawPresence != globalState->cachedPresence)
+            {
+                // The state changed!
+                globalState->cachedPresence = (isVarianceNoise ? false : rawPresence);
+
+                // Send a message to the Automation Queue
+                SystemEvent event;
+                event.type = EVENT_PRESENCE_CHANGED;
+                event.payload = globalState->cachedPresence ? 1 : 0;
+
+                // Push it to the queue (don't block if full)
+                xQueueSend(automationQueue, &event, 0);
+            }
         }
     }
 
@@ -246,15 +276,14 @@ namespace SensorManager
         if (!globalState)
             return;
 
-        // If we haven't received data in 30 seconds, restart it
         if (globalState->sensorReady && globalState->lastRadarDataTime > 0 &&
             (millis() - globalState->lastRadarDataTime > RADAR_STALE_MS))
         {
-
-            Serial.println("[HEALTH] Radar data is stale — attempting re-init...");
-            globalState->sensorReady = false;
-            globalState->cachedPresence = false;
-            attemptRadarRecovery();
+            Serial.println("[HEALTH] Radar data is stale — notifying task for recovery...");
+            if (sensorsTaskHandle != NULL)
+            {
+                xTaskNotify(sensorsTaskHandle, (1 << 0), eSetBits);
+            }
         }
     }
     // Global button processor (no longer needed inside a blocking smartDelay)
@@ -272,15 +301,31 @@ namespace SensorManager
             WebDashboard::stopAPMode();
         }
     }
+
     void TaskSensors(void *pvParameters)
     {
+        uint32_t notificationValue;
+
         for (;;)
         {
+            // Non-blocking check for health recovery signal
+            if (xTaskNotifyWait(0x00, 0xFFFFFFFF, &notificationValue, 0) == pdTRUE)
+            {
+                if (notificationValue & (1 << 0))
+                {
+                    globalState->sensorReady = false;
+                    globalState->cachedPresence = false;
+                    attemptRadarRecovery();
+                }
+            }
+            else
+            {
+                poll();
+            }
+
             processButton();
-            poll();
             AutomationManager::trackPresenceTime();
 
-            // Feed the task watchdog and yield for 20ms
             esp_task_wdt_reset();
             vTaskDelay(pdMS_TO_TICKS(20));
         }

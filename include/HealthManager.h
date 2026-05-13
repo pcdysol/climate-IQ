@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 namespace HealthManager {
-    void loop();
+    // Change this signature:
+    void HealthTimerCallback(TimerHandle_t xTimer);
     String getResetReason();
 }

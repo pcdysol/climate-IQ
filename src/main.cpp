@@ -18,6 +18,15 @@ Preferences preferences;
 
 bool pendingReboot = false;
 unsigned long rebootTime = 0;
+// 1. Define the globals
+QueueHandle_t automationQueue;
+TimerHandle_t healthTimer;
+TimerHandle_t enforceTimer;
+TimerHandle_t ecoTimer;
+TimerHandle_t offTimer;
+TaskHandle_t sensorsTaskHandle = NULL;
+// Add this near the top with your other globals:
+SemaphoreHandle_t irMutex;
 
 // ==========================================
 // Setup & Initialization
@@ -28,6 +37,8 @@ void setup() {
     
     // 1. Hardware Initialization
     Indicator::init();
+    // Add this inside setup(), BEFORE IRManager::init():
+    irMutex = xSemaphoreCreateMutex();
     IRManager::init();
     SensorManager::init(&sysData);
     WebDashboard::init();
@@ -43,8 +54,26 @@ void setup() {
     sysData.radarManualValue = preferences.getBool("rad_ovr_v", false);
     sysData.lastPresenceTime = millis();
     sysData.switch_gsm_wifi = preferences.getBool("use_wifi", true);
+    sysData.flapDelaySec = preferences.getULong("flap_delay", 10);
     
     ScheduleManager::refreshHasAnySchedule();
+    // 2. Create the Queue (Holds up to 10 events)
+    automationQueue = xQueueCreate(10, sizeof(SystemEvent));
+    
+    healthTimer = xTimerCreate("HealthTmr", pdMS_TO_TICKS(30000), pdTRUE, (void *)0, HealthManager::HealthTimerCallback);
+    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(900000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
+    
+    // --- ADD THESE TWO TIMERS ---
+    // Note: pdFALSE means they only run exactly once per trigger.
+    ecoTimer = xTimerCreate("EcoTmr", pdMS_TO_TICKS(120000), pdFALSE, (void *)0, AutomationManager::EcoTimerCallback);
+    offTimer = xTimerCreate("OffTmr", pdMS_TO_TICKS(300000), pdFALSE, (void *)0, AutomationManager::OffTimerCallback);
+
+    xTimerStart(healthTimer, 0);
+    xTimerStart(enforceTimer, 0);
+
+    // 4. Create New Tasks
+    xTaskCreatePinnedToCore(ScheduleManager::TaskSchedule, "SchedTask", 4096, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(AutomationManager::TaskAutomation, "AutoTask", 4096, NULL, 4, NULL, 1);
 
     // 4. Spin up FreeRTOS Tasks
     // Arguments: Function, Name, Stack Size, Params, Priority, Task Handle, Core
@@ -94,12 +123,6 @@ void loop() {
         sysData.lastStateChangeTime = millis();
         trackerInitialized = true;
     }
-
-    // Run core automation logic
-    AutomationManager::loop();
-    HealthManager::loop();
-    ScheduleManager::loop();
-    AutomationManager::enforceACState();
 
     // Yield to FreeRTOS scheduler to prevent Task Watchdog Timeout
     vTaskDelay(pdMS_TO_TICKS(100)); 

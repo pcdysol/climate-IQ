@@ -3,26 +3,6 @@
 
 namespace Indicator
 {
-
-    // -- -INTERRUPT VARIABLES-- -
-    // Volatile tells the CPU "this can change at any time from hardware"
-    volatile bool buttonPressed = false;
-    volatile unsigned long lastInterruptTime = 0;
-    // Change 200 to 50 for a more responsive button
-    const unsigned long DEBOUNCE_DELAY = 50;
-
-    void IRAM_ATTR isrHandleButton()
-    {
-        unsigned long interruptTime = millis();
-        // Only process if enough time has passed since the last VALID trigger
-        if (interruptTime - lastInterruptTime > DEBOUNCE_DELAY)
-        {
-            buttonPressed = true;
-            // Move this inside the block!
-            lastInterruptTime = interruptTime;
-        }
-    }
-
     static void setColor(bool r, bool g, bool b)
     {
         // Common Anode: LOW = ON, HIGH = OFF
@@ -37,7 +17,7 @@ namespace Indicator
     {
         pinMode(BUTTON_PIN, INPUT_PULLUP);
         // Attach the hardware interrupt to trigger when the pin goes LOW (pressed)
-        attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), isrHandleButton, FALLING);
+        // attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), isrHandleButton, FALLING);
         pinMode(LED_PIN, OUTPUT);
         pinMode(RED_PIN, OUTPUT);
         pinMode(GREEN_PIN, OUTPUT);
@@ -172,53 +152,37 @@ namespace Indicator
 
     ButtonEvent checkButton()
     {
-        // We no longer need pressStartTime!
-        static bool trackingPress = false;
+        static unsigned long pressedTime = 0;
+        static bool isPressed = false;
         static bool longPressTriggered = false;
 
-        // 1. Interrupt fired: start tracking
-        if (buttonPressed)
-        {
-            buttonPressed = false;
-            // Add this guard to ignore release bounces!
-            if (!trackingPress)
-            {
-                trackingPress = true;
-                longPressTriggered = false;
+        // digitalRead is LOW when the button is pressed (INPUT_PULLUP)
+        bool currentState = (digitalRead(BUTTON_PIN) == LOW); 
+
+        if (currentState && !isPressed) {
+            // State 1: Button was JUST pressed down
+            isPressed = true;
+            pressedTime = millis();
+            longPressTriggered = false;
+        } 
+        else if (currentState && isPressed) {
+            // State 2: Button is BEING HELD down
+            if (!longPressTriggered && (millis() - pressedTime >= 5000)) {
+                longPressTriggered = true;
+                return BTN_LONG_PRESS;
+            }
+        } 
+        else if (!currentState && isPressed) {
+            // State 3: Button was JUST released
+            isPressed = false;
+            unsigned long duration = millis() - pressedTime;
+            
+            // If it was held for more than 50ms (debounce) but didn't trigger a long press
+            if (!longPressTriggered && duration > 50) { 
+                return BTN_SHORT_PRESS;
             }
         }
 
-        if (trackingPress)
-        {
-            bool currentState = digitalRead(BUTTON_PIN);
-
-            // CRITICAL FIX: Calculate duration using the exact
-            // timestamp recorded by the hardware interrupt!
-            unsigned long duration = millis() - lastInterruptTime;
-
-            // 2. Check for Long Press while button is still held
-            if (currentState == LOW)
-            {
-                if (!longPressTriggered && duration >= 5000)
-                {
-                    longPressTriggered = true;
-                    return BTN_LONG_PRESS;
-                }
-            }
-            // 3. Button released: check for Short Press
-            else
-            {
-                trackingPress = false;
-
-                // Because we use the hardware timestamp, even if a GSM
-                // delay blocked this loop for 5 seconds, the duration
-                // will correctly read 5000+ ms and trigger the press!
-                if (!longPressTriggered && duration > 50)
-                {
-                    return BTN_SHORT_PRESS;
-                }
-            }
-        }
         return BTN_NONE;
     }
 

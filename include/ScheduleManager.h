@@ -4,7 +4,7 @@
 
 namespace ScheduleManager {
     void init(SystemData* state);
-    void loop();
+    void TaskSchedule(void *pvParameters);
     void refreshHasAnySchedule();
     void handleScheduleCommand(JsonDocument &doc);
     

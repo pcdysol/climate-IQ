@@ -1,5 +1,32 @@
 #pragma once
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/timers.h>
+#include <atomic>
+
+// 1. Define the types of events that can wake up the Automation Manager
+enum EventType {
+    EVENT_PRESENCE_CHANGED,
+    EVENT_MQTT_COMMAND,
+    EVENT_SCHEDULE_TRIGGER,
+    EVENT_ECO_TRIGGER, // <--- ADD THIS
+    EVENT_OFF_TRIGGER,  // <--- ADD THIS
+    EVENT_ENFORCE_TRIGGER // <--- ADD THIS
+};
+
+// 2. Define the message payload
+struct SystemEvent {
+    EventType type;
+    int payload; // e.g., Target temperature, or 1/0 for presence
+};
+
+// 3. Declare Global RTOS Handles so other files can use them
+extern QueueHandle_t automationQueue;
+extern TimerHandle_t healthTimer;
+extern TimerHandle_t enforceTimer;
+extern TimerHandle_t ecoTimer; // <--- ADD THIS
+extern TimerHandle_t offTimer; // <--- ADD THIS
 
 // State machine for automation
 enum AutoState {
@@ -65,14 +92,21 @@ struct SystemData {
     bool radarManualValue = false;
     bool radarInitFailed = false;
     bool lastPresenceState = false;
-    unsigned long accumulatedPresenceMs = 0;
     unsigned long lastStateChangeTime = 0;
+    // --- Automation Settings ---
+    unsigned long flapDelaySec = 10;       // Customizable seconds to ignore radar
+    unsigned long flapDelayStart = 0;      // Timestamp of when OFF was sent
+    bool isFlapDelayActive = false;        // Flag to enable the blind spot
     // --- State Machine & Scheduling ---
     AutoState acAutoState = AUTO_OFF;
     bool isInsideSchedule = false;
     bool hasAnySchedule = false;
     unsigned long lastCommandTime = 0;
+    std::atomic<uint32_t> accumulatedPresenceMs{0};
 };
 
 // Expose the global state object to any file that includes this header
 extern SystemData sysData;
+// 3. At the bottom of the file (with the other externs), add:
+extern SemaphoreHandle_t irMutex;
+extern TaskHandle_t sensorsTaskHandle; // Expose the task handle

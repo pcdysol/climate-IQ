@@ -12,20 +12,27 @@ extern Preferences preferences;
 
 namespace ScheduleManager
 {
-    int lastScheduledMin = -1;  
-    int lastScheduledWday = -1; 
+    int lastScheduledMin = -1;
+    int lastScheduledWday = -1;
 
     int dayNameToWday(const String &day)
     {
         String d = day;
         d.toLowerCase();
-        if (d == "sunday") return 0;
-        if (d == "monday") return 1;
-        if (d == "tuesday") return 2;
-        if (d == "wednesday") return 3;
-        if (d == "thursday") return 4;
-        if (d == "friday") return 5;
-        if (d == "saturday") return 6;
+        if (d == "sunday")
+            return 0;
+        if (d == "monday")
+            return 1;
+        if (d == "tuesday")
+            return 2;
+        if (d == "wednesday")
+            return 3;
+        if (d == "thursday")
+            return 4;
+        if (d == "friday")
+            return 5;
+        if (d == "saturday")
+            return 6;
         return -1;
     }
 
@@ -211,7 +218,7 @@ namespace ScheduleManager
         if (sysData.radarManualOverride)
             return;
         if (radarSetting == 0)
-            return; 
+            return;
 
         if (radarSetting == 1 && !sysData.radarAutoMode)
         {
@@ -290,12 +297,15 @@ namespace ScheduleManager
             int end = v["end"] | -1;
             int temp = v["temp"] | 0;
 
-            if (start < 0 || start > 1439 || end <= start) continue;
-            
-            if (end > 1440) end = 1440; 
-            
-            if (temp < 16 || temp > 32) continue;
-            
+            if (start < 0 || start > 1439 || end <= start)
+                continue;
+
+            if (end > 1440)
+                end = 1440;
+
+            if (temp < 16 || temp > 32)
+                continue;
+
             uint8_t segRadar = 0;
             if (v["radar"])
             {
@@ -364,114 +374,168 @@ namespace ScheduleManager
         NetworkManager::publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
     }
 
-    void loop()
+    void TaskSchedule(void *pvParameters)
     {
-        struct tm timeinfo;
-        if (!getLocalTime(&timeinfo, 0))
-            return; 
-
-        int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-        int currentWday = timeinfo.tm_wday; 
-
-        bool isBootRun = (lastScheduledMin == -1 || lastScheduledWday == -1);
-        if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday)
-            return; 
-
-        int prevMin = lastScheduledMin;
-        int prevWday = lastScheduledWday;
-
-        lastScheduledMin = currentMin;
-        lastScheduledWday = currentWday;
-
-        if (isBootRun)
+        for (;;)
         {
-            uint8_t count = loadSegmentCount(currentWday);
-            if (count == 0)
-                return; 
-            ScheduleSegment seg;
-            if (findSegment(currentWday, currentMin, seg))
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+
+            // 1. Time validity check: If epoch is before 2021, NTP hasn't synced.
+            // Wait 5 seconds and check again.
+            if (tv.tv_sec < 1609459200)
             {
-                applySegmentRadar(seg.radar);
-                applySegmentParams(seg);
-                sysData.currentNormalTemp = seg.temp;
-                preferences.putInt("normal_temp", seg.temp);
-                if (!sendScheduleIR(currentWday, seg.temp))
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                continue;
+            }
+
+            // 2. Calculate EXACT milliseconds until the top of the next minute (00 seconds)
+            int current_sec = tv.tv_sec % 60;
+            int current_ms = tv.tv_usec / 1000;
+            uint32_t ms_to_next_minute = 60000 - ((current_sec * 1000) + current_ms);
+
+            // 3. Sleep dynamically. CPU uses 0% power here.
+            vTaskDelay(pdMS_TO_TICKS(ms_to_next_minute));
+
+            // --- WAKING UP: It is now exactly XX:XX:00 ---
+
+            struct tm timeinfo;
+            if (!getLocalTime(&timeinfo, 0)) continue;
+
+            int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+            int currentWday = timeinfo.tm_wday;
+
+            bool isBootRun = (lastScheduledMin == -1 || lastScheduledWday == -1);
+            if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday)
+                continue;
+
+            int prevMin = lastScheduledMin;
+            int prevWday = lastScheduledWday;
+
+            lastScheduledMin = currentMin;
+            lastScheduledWday = currentWday;
+            
+            // ... The rest of your existing logic starts here
+            if (isBootRun)
+            {
+                uint8_t count = loadSegmentCount(currentWday);
+                if (count == 0)
                 {
-                    AutomationManager::executeACCommand(true, seg.temp, "boot_schedule_on");
+                    sysData.isInsideSchedule = false; // <--- ADD THIS
+                    continue;
+                }
+                ScheduleSegment seg;
+                if (findSegment(currentWday, currentMin, seg))
+                {
+                    sysData.isInsideSchedule = true;
+                    applySegmentRadar(seg.radar);
+                    applySegmentParams(seg);
+                    sysData.currentNormalTemp = seg.temp;
+                    preferences.putInt("normal_temp", seg.temp);
+                    if (!sendScheduleIR(currentWday, seg.temp))
+                    {
+                        AutomationManager::executeACCommand(true, seg.temp, "boot_schedule_on");
+                    }
+                    else
+                    {
+                        Indicator::indicateIRSent();
+                        char detail[32];
+                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+                        NetworkManager::publishACK("boot_schedule_on", detail);
+                        sysData.lastCommandTime = millis();
+                    }
+                    sysData.acAutoState = AUTO_ON_NORMAL;
+                    // ---> THE FIX: Jumpstart timers if room is already empty on new segment <---
+                    if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                        Serial.println("[SCHED] AC ON via schedule, but room is empty. Starting timers.");
+                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                    }
+                    Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
+                                  timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
                 }
                 else
                 {
-                    Indicator::indicateIRSent();
-                    char detail[32];
-                    snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
-                    NetworkManager::publishACK("boot_schedule_on", detail);
-                    sysData.lastCommandTime = millis();
+                    sysData.isInsideSchedule = false;
+                    if (!IRManager::playCustomButton("ir_off"))
+                        IRManager::sendACFallback(false, 24);
+                    sysData.acAutoState = AUTO_OFF;
+                    // ---> ADD THIS BLOCK: Hard toggle radar OFF <---
+                if (sysData.radarAutoMode) {
+                    sysData.radarAutoMode = false;
+                    preferences.putBool("radar_auto", false);
+                    Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
                 }
-                sysData.acAutoState = AUTO_ON_NORMAL;
-                Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
-                              timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
+                // -----------------------------------------------
+                    Indicator::indicateIRSent();
+                    Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
+                                  timeinfo.tm_hour, timeinfo.tm_min);
+                }
+                continue;
+            }
+
+            ScheduleSegment currentSeg;
+            ScheduleSegment prevSeg;
+            bool hasCurrentSeg = findSegment(currentWday, currentMin, currentSeg);
+            bool hasPrevSeg = findSegment(prevWday, prevMin, prevSeg);
+            sysData.isInsideSchedule = hasCurrentSeg;
+
+            if (!hasCurrentSeg && !hasPrevSeg)
+                continue;
+            if (hasCurrentSeg && hasPrevSeg && sameSegment(currentSeg, prevSeg))
+                continue;
+
+            if (hasCurrentSeg)
+            {
+                applySegmentRadar(currentSeg.radar);
+                applySegmentParams(currentSeg);
+
+                if (!hasPrevSeg || currentSeg.temp != prevSeg.temp)
+                {
+                    sysData.currentNormalTemp = currentSeg.temp;
+                    preferences.putInt("normal_temp", currentSeg.temp);
+                    if (!sendScheduleIR(currentWday, currentSeg.temp))
+                    {
+                        AutomationManager::executeACCommand(true, currentSeg.temp, "schedule_on");
+                    }
+                    else
+                    {
+                        Indicator::indicateIRSent();
+                        char detail[32];
+                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
+                        NetworkManager::publishACK("schedule_on", detail);
+                        sysData.lastCommandTime = millis();
+                    }
+                    sysData.acAutoState = AUTO_ON_NORMAL;
+                    // ---> THE FIX: Jumpstart timers if room is already empty on boot <---
+                    if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                        Serial.println("[SCHED] AC ON via boot schedule, but room is empty. Starting timers.");
+                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                    }
+                    Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
+                                  timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+                }
+                else
+                {
+                    // sysData.acAutoState = AUTO_ON_NORMAL;  //This state is already set from the previous segment, no need to set again
+                    Serial.printf("[SCHED] %02d:%02d -> segment updated, AC remains at %dC\n",
+                                  timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+                }
             }
             else
             {
-                if (!IRManager::playCustomButton("ir_off"))
-                    IRManager::sendACFallback(false, 24);
+                AutomationManager::executeACCommand(false, 24, "schedule_off");
                 sysData.acAutoState = AUTO_OFF;
-                Indicator::indicateIRSent();
-                Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
+                // Only turn it off automatically if the user didn't manually override it
+                if (sysData.radarAutoMode && !sysData.radarManualOverride) {
+                    sysData.radarAutoMode = false;
+                    preferences.putBool("radar_auto", false);
+                    Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
+                }
+                Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
                               timeinfo.tm_hour, timeinfo.tm_min);
             }
-            return;
-        }
-
-        ScheduleSegment currentSeg;
-        ScheduleSegment prevSeg;
-        bool hasCurrentSeg = findSegment(currentWday, currentMin, currentSeg);
-        bool hasPrevSeg = findSegment(prevWday, prevMin, prevSeg);
-        sysData.isInsideSchedule = hasCurrentSeg;
-
-        if (!hasCurrentSeg && !hasPrevSeg)
-            return;
-        if (hasCurrentSeg && hasPrevSeg && sameSegment(currentSeg, prevSeg))
-            return;
-
-        if (hasCurrentSeg)
-        {
-            applySegmentRadar(currentSeg.radar);
-            applySegmentParams(currentSeg);
-
-            if (!hasPrevSeg || currentSeg.temp != prevSeg.temp)
-            {
-                sysData.currentNormalTemp = currentSeg.temp;
-                preferences.putInt("normal_temp", currentSeg.temp);
-                if (!sendScheduleIR(currentWday, currentSeg.temp))
-                {
-                    AutomationManager::executeACCommand(true, currentSeg.temp, "schedule_on");
-                }
-                else
-                {
-                    Indicator::indicateIRSent();
-                    char detail[32];
-                    snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
-                    NetworkManager::publishACK("schedule_on", detail);
-                    sysData.lastCommandTime = millis(); 
-                }
-                sysData.acAutoState = AUTO_ON_NORMAL;
-                Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
-                              timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
-            }
-            else
-            {
-                sysData.acAutoState = AUTO_ON_NORMAL;
-                Serial.printf("[SCHED] %02d:%02d -> segment updated, AC remains at %dC\n",
-                              timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
-            }
-        }
-        else
-        {
-            AutomationManager::executeACCommand(false, 24, "schedule_off");
-            sysData.acAutoState = AUTO_OFF;
-            Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
-                          timeinfo.tm_hour, timeinfo.tm_min);
         }
     }
 }

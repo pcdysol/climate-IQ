@@ -4,18 +4,19 @@
 #include "SensorManager.h"
 #include "Indicator.h"
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <AsyncMqttClient.h>
 #include <WebServer.h>
 #include <Update.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "ScheduleManager.h"
+#include <nvs_flash.h>
 
 // --- Externs (Grabbing from main.cpp) ---
 extern Preferences preferences;
 extern bool pendingReboot;
 extern unsigned long rebootTime;
-extern PubSubClient client; // Needed to cleanly disconnect MQTT when entering AP mode
+extern AsyncMqttClient mqttClient;
 
 namespace WebDashboard
 {
@@ -201,8 +202,8 @@ async function pollD(){
     var pr=document.getElementById('dpres');
     pr.innerText=d.presence?'DETECTED':'EMPTY';
     pr.className='badge '+(d.presence?'green':'red');
-    var ids=['inp-nt','inp-et','inp-etime','inp-otime'];
-    var vals=[d.normal_temp,d.eco_temp,d.eco_time_min,d.off_time_min];
+    var ids=['inp-nt','inp-et','inp-etime','inp-otime','inp-fdelay'];
+    var vals=[d.normal_temp,d.eco_temp,d.eco_time_min,d.off_time_min, d.flap_delay_sec];
     for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(el&&document.activeElement!==el)el.value=vals[i];}
     var u=d.uptime_s,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
     document.getElementById('dvh').innerText=(d.free_heap/1024).toFixed(1)+' KB';
@@ -210,6 +211,7 @@ async function pollD(){
     document.getElementById('dvr').innerText=d.radar_ready?'OK':'ERROR';
     document.getElementById('dvhdc').innerText=d.hdc_ok?'OK':'FAULT';
     document.getElementById('dva').innerText=d.radar_auto?'Enabled':'Disabled';
+    document.getElementById('dvnvs').innerText = d.nvs_used_entries + ' / ' + d.nvs_total_entries;
   }catch(e){}
 }
 async function saveDP(){
@@ -217,8 +219,9 @@ async function saveDP(){
   var e=document.getElementById('inp-et').value;
   var et=document.getElementById('inp-etime').value;
   var ot=document.getElementById('inp-otime').value;
+  var fd=document.getElementById('inp-fdelay').value;
   if(parseInt(ot)<=parseInt(et))return alert('Off Time must be greater than Eco Time!');
-  var res=await fetch('/setparams?normal_temp='+n+'&eco_temp='+e+'&eco_time='+et+'&off_time='+ot,{method:'POST'});
+  var res=await fetch('/setparams?normal_temp='+n+'&eco_temp='+e+'&eco_time='+et+'&off_time='+ot+'&flap_delay='+fd,{method:'POST'});
   alert(await res.text());
 }
 async function fetchSched() {
@@ -349,6 +352,10 @@ window.onload=function(){refresh();};
         <div><div class="pn">Off Delay</div><div class="ps">Minutes before AC turns off</div></div>
         <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-otime" min="2" max="240" value="5"><span class="pu">min</span></div>
       </div>
+      <div class="pr" style="border:none;">
+        <div><div class="pn">Flap Delay</div><div class="ps">Ignore radar after OFF</div></div>
+        <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-fdelay" min="0" max="120" value="10"><span class="pu">sec</span></div>
+      </div>
       <button class="btn-p" style="margin-top:14px;" onclick="saveDP()">Save Parameters</button>
     </div>
     <div class="card">
@@ -358,6 +365,7 @@ window.onload=function(){refresh();};
       <div class="dr"><span class="dk">Radar Sensor</span><span class="dv" id="dvr">&#8212;</span></div>
       <div class="dr"><span class="dk">HDC1080 Sensor</span><span class="dv" id="dvhdc">&#8212;</span></div>
       <div class="dr"><span class="dk">Radar Auto Mode</span><span class="dv" id="dva">&#8212;</span></div>
+      <div class="dr"><span class="dk">NVS Flash Used</span><span class="dv" id="dvnvs">&#8212;</span></div>
     </div>
     <div class="card" style="grid-column: 1 / -1;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -395,7 +403,7 @@ window.onload=function(){refresh();};
             if (!server.authenticate(WWW_USERNAME, WWW_PASSWORD)) {
                 return server.requestAuthentication();
             }
-            server.send(200, "text/html", FPSTR(DASHBOARD_HTML)); });
+            server.send(200, "text/html; charset=utf-8", FPSTR(DASHBOARD_HTML)); });
 
     server.on("/setwifi", HTTP_POST, []()
               {
@@ -441,15 +449,15 @@ window.onload=function(){refresh();};
             };
             
             addKey("ir_on", "ON"); addKey("ir_off", "OFF");
-            addKey("ir_24", "24°C"); addKey("ir_26", "26°C");
-            addKey("ir_28", "28°C"); addKey("ir_30", "30°C");
+            addKey("ir_24", "24\xC2\xB0""C"); addKey("ir_26", "26\xC2\xB0""C");
+            addKey("ir_28", "28\xC2\xB0""C"); addKey("ir_30", "30\xC2\xB0""C");
 
             doc["has_credentials"] = (preferences.getString("wifi_ssid", "").length() > 0);
             doc["mode"] = sysData.switch_gsm_wifi ? "wifi" : "gsm";
             
             String json;
             serializeJson(doc, json);
-            server.send(200, "application/json", json); });
+            server.send(200, "application/json; charset=utf-8", json); });
 
     // --- IR Learning Helpers ---
     auto handleLearn = [](const char *key, bool isProtocol)
@@ -515,11 +523,18 @@ window.onload=function(){refresh();};
             doc["ok"] = (pass == String(DEV_PASSWORD));
             String json;
             serializeJson(doc, json);
-            server.send(200, "application/json", json); });
+            server.send(200, "application/json; charset=utf-8", json); });
 
     server.on("/devdata", HTTP_GET, []()
               {
             JsonDocument doc;
+            // --- ADD NVS HEALTH CHECK ---
+        nvs_stats_t nvs_stats;
+        nvs_get_stats(NULL, &nvs_stats);
+        doc["nvs_used_entries"] = nvs_stats.used_entries;
+        doc["nvs_free_entries"] = nvs_stats.free_entries;
+        doc["nvs_total_entries"] = nvs_stats.total_entries;
+        // ----------------------------
             if (sysData.sensorReady) {
                 const MyLD2410::ValuesArray& mvSig = SensorManager::getMovingSignals(); 
                 const MyLD2410::ValuesArray& stSig = SensorManager::getStationarySignals(); 
@@ -538,12 +553,13 @@ window.onload=function(){refresh();};
             doc["eco_temp"]     = sysData.currentEcoTemp;
             doc["eco_time_min"] = (int)(sysData.TEcoTime / 60000);
             doc["off_time_min"] = (int)(sysData.TOffTime / 60000);
+            doc["flap_delay_sec"] = sysData.flapDelaySec; // <--- ADD THIS
             doc["free_heap"]    = (int)ESP.getFreeHeap();
             doc["uptime_s"]     = (int)(millis() / 1000);
             doc["hdc_ok"]       = !sysData.hdcInitFailed;
             String json;
             serializeJson(doc, json);
-            server.send(200, "application/json", json); });
+            server.send(200, "application/json; charset=utf-8", json); });
 
     server.on("/setparams", HTTP_POST, []()
               {
@@ -568,6 +584,11 @@ window.onload=function(){refresh();};
                 if (newOff <= sysData.TEcoTime) newOff = sysData.TEcoTime + 60000;
                 sysData.TOffTime = newOff;
                 preferences.putULong("off_time", sysData.TOffTime);
+                changed = true;
+            }
+            if (server.hasArg("flap_delay")) {
+                sysData.flapDelaySec = (unsigned long)constrain(server.arg("flap_delay").toInt(), 0, 120);
+                preferences.putULong("flap_delay", sysData.flapDelaySec);
                 changed = true;
             }
             if (changed) {
@@ -606,12 +627,13 @@ window.onload=function(){refresh();};
             if (!hasAnyData) doc["status"] = "No schedules currently saved in flash.";
             String json;
             serializeJson(doc, json);
-            server.send(200, "application/json", json); });
+            server.send(200, "application/json; charset=utf-8", json); });
 
     server.on("/update", HTTP_GET, []()
               { server.send(200, "text/html", "<form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Upload'></form>"); });
     server.on("/update", HTTP_POST, []()
               {
+            if (!server.authenticate(WWW_USERNAME, WWW_PASSWORD)) return server.requestAuthentication();
             server.send(200, "text/plain", Update.hasError() ? "OTA FAILED" : "OTA SUCCESS - Rebooting");
             delay(1000); ESP.restart(); }, []()
               {
@@ -636,7 +658,7 @@ window.onload=function(){refresh();};
 
     if (sysData.switch_gsm_wifi)
     {
-      client.disconnect();
+      mqttClient.disconnect();
       WiFi.disconnect(true);
     }
 

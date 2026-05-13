@@ -2,6 +2,7 @@
 #include "SensorManager.h"
 #include "NetworkManager.h"
 #include <rom/rtc.h>
+#include "esp_task_wdt.h"
 
 namespace HealthManager {
 
@@ -17,28 +18,18 @@ namespace HealthManager {
         }
     }
 
-    void loop() {
-        static unsigned long lastHealthCheck = 0;
-        static unsigned long lastTimeSave = 0;
-        const unsigned long HEALTH_INTERVAL = 30000;     
-        const unsigned long TIME_SAVE_INTERVAL = 600000; 
-        const uint32_t HEAP_WARN_BYTES = 12000;          
-
-        if (millis() - lastTimeSave >= TIME_SAVE_INTERVAL) {
-            lastTimeSave = millis();
-        }
-
-        if (millis() - lastHealthCheck < HEALTH_INTERVAL) return;
-        lastHealthCheck = millis();
-
+    // Change this signature:
+    void HealthTimerCallback(TimerHandle_t xTimer) {
+        // You NO LONGER NEED lastHealthCheck or millis() logic!
+        // FreeRTOS guarantees this function only executes exactly every 30 seconds.
+        
         SensorManager::checkHealth();
 
         uint32_t freeHeap = ESP.getFreeHeap();
-        if (freeHeap < HEAP_WARN_BYTES) {
+        if (freeHeap < 12000) {
             char detail[48];
             snprintf(detail, sizeof(detail), "free_heap=%u bytes", freeHeap);
             NetworkManager::publishHealthAlert("low_heap", detail);
-            Serial.printf("[HEALTH] Low heap warning: %u bytes free\n", freeHeap);
         }
     }
 }

@@ -501,25 +501,15 @@ namespace GSMManager
         {
             unsigned long now = millis();
 
-            // Replace the old accumulatedPresenceMs lines with this:
-            if (sysData.lastPresenceState == true)
-            {
-                uint32_t delta = (now - sysData.lastStateChangeTime);
-                sysData.accumulatedPresenceMs.fetch_add(delta, std::memory_order_relaxed);
-            }
-
             int total_interval_secs = round(TELEMETRY_INTERVAL / 1000.0);
 
-            // ATOMICALLY read and reset to 0
+            // Sensor task (trackPresenceTime) accumulates every 20ms — just harvest here.
             uint32_t currentAccumulatedMs = sysData.accumulatedPresenceMs.exchange(0, std::memory_order_relaxed);
             int presence_secs = round(currentAccumulatedMs / 1000.0);
 
             if (presence_secs > total_interval_secs)
                 presence_secs = total_interval_secs;
             int empty_secs = total_interval_secs - presence_secs;
-
-            sysData.accumulatedPresenceMs = 0;
-            sysData.lastStateChangeTime = now;
 
             lastTelemetrygsm = millis();
             float temperature = sysData.currentTemp;

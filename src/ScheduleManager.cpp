@@ -316,9 +316,15 @@ namespace ScheduleManager
                     segRadar = 2;
             }
 
-            uint8_t segEco = (uint8_t)(v["eco"] | 0);
-            uint8_t segTeco = (uint8_t)(v["teco"] | 0);
-            uint8_t segToff = (uint8_t)(v["toff"] | 0);
+            // Backend may send these as strings ("1") or integers (1) — handle both.
+            auto jToU8 = [](JsonVariant val) -> uint8_t {
+                if (val.is<int>()) return (uint8_t)val.as<int>();
+                const char* s = val | "";
+                return (uint8_t)atoi(s);
+            };
+            uint8_t segEco  = jToU8(v["eco"]);
+            uint8_t segTeco = jToU8(v["teco"]);
+            uint8_t segToff = jToU8(v["toff"]);
 
             segs[count++] = {(uint16_t)start, (uint16_t)end, (uint8_t)temp, segRadar, segEco, segTeco, segToff};
         }
@@ -361,11 +367,67 @@ namespace ScheduleManager
         sysData.radarManualOverride = false;
         preferences.putBool("rad_ovr", false);
 
+        // Immediately re-evaluate if this schedule is for today
         struct tm timeinfo;
-        if (getLocalTime(&timeinfo) && timeinfo.tm_wday == wday)
+        if (getLocalTime(&timeinfo, 0) && timeinfo.tm_wday == wday)
         {
-            lastScheduledMin = -1;
-            lastScheduledWday = -1;
+            int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+            ScheduleSegment seg;
+            bool insideSeg = findSegment(wday, currentMin, seg);
+            sysData.isInsideSchedule = insideSeg;
+
+            if (insideSeg)
+            {
+                applySegmentParams(seg);
+                applySegmentRadar(seg.radar);
+                sysData.currentNormalTemp = seg.temp;
+                preferences.putInt("normal_temp", seg.temp);
+
+                if (sysData.acAutoState != AUTO_ON_NORMAL)
+                {
+                    // AC is in eco or sensor-off state — update settings silently, no IR
+                    Serial.printf("[SCHED] Schedule updated while AC in managed state (%s). Settings applied, no IR sent.\n",
+                                  sysData.acAutoState == AUTO_ON_ECO ? "eco" : "off");
+                }
+                else
+                {
+                    if (!sendScheduleIR(wday, seg.temp))
+                    {
+                        AutomationManager::executeACCommand(true, seg.temp, "schedule_update");
+                    }
+                    else
+                    {
+                        xTimerReset(enforceTimer, 0);
+                        Indicator::indicateIRSent();
+                        char detail[32];
+                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+                        NetworkManager::publishACK("schedule_update", detail);
+                        sysData.lastCommandTime = millis();
+                    }
+                    sysData.acAutoState = AUTO_ON_NORMAL;
+                    if (sysData.radarAutoMode && !sysData.cachedPresence)
+                    {
+                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                    }
+                }
+            }
+            else
+            {
+                AutomationManager::executeACCommand(false, 24, "schedule_update_off");
+                sysData.acAutoState = AUTO_OFF;
+                if (sysData.radarAutoMode) {
+                    sysData.radarAutoMode = false;
+                    preferences.putBool("radar_auto", false);
+                    Serial.println("[SCHED] Schedule update: outside segments, radar disabled.");
+                }
+                sysData.radarManualOverride = false;
+                preferences.putBool("rad_ovr", false);
+            }
+
+            // Sync task memory so it doesn't re-process this same minute
+            lastScheduledMin = currentMin;
+            lastScheduledWday = wday;
         }
 
         Serial.printf("[SCHED] %d segment(s) saved for %s (wday=%d)\n", count, day, wday);
@@ -428,31 +490,56 @@ namespace ScheduleManager
                 if (findSegment(currentWday, currentMin, seg))
                 {
                     sysData.isInsideSchedule = true;
-                    applySegmentRadar(seg.radar);
                     applySegmentParams(seg);
+                    applySegmentRadar(seg.radar);
                     sysData.currentNormalTemp = seg.temp;
                     preferences.putInt("normal_temp", seg.temp);
-                    if (!sendScheduleIR(currentWday, seg.temp))
+
+                    // Check if radar already made an AC decision during the offline wait.
+                    // AUTO_ON_ECO is only ever set by radar — schedule always enters at NORMAL.
+                    // AUTO_OFF with lastCommandTime > 0 means radar drove the AC off (not boot default).
+                    AutoState curState = sysData.acAutoState.load();
+                    bool radarDroveOff = sysData.radarAutoMode &&
+                                        (curState == AUTO_ON_ECO ||
+                                        (curState == AUTO_OFF && sysData.lastCommandTime > 0));
+
+                    if (radarDroveOff)
                     {
-                        AutomationManager::executeACCommand(true, seg.temp, "boot_schedule_on");
+                        // Radar is managing. Apply schedule settings silently so the correct
+                        // temp/eco/off values are ready when the room becomes occupied again.
+                        // Re-arm offTimer only if currently in eco (eco already fired, off hasn't).
+                        if (curState == AUTO_ON_ECO && sysData.TOffTime > 0)
+                            xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+
+                        Serial.printf("[SCHED] Boot %02d:%02d — radar managed (%s), schedule params applied, no IR\n",
+                                      timeinfo.tm_hour, timeinfo.tm_min,
+                                      curState == AUTO_ON_ECO ? "eco" : "off");
                     }
                     else
                     {
-                        Indicator::indicateIRSent();
-                        char detail[32];
-                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
-                        NetworkManager::publishACK("boot_schedule_on", detail);
-                        sysData.lastCommandTime = millis();
+                        // Normal boot: no radar decision yet — turn AC on per schedule.
+                        if (!sendScheduleIR(currentWday, seg.temp))
+                        {
+                            AutomationManager::executeACCommand(true, seg.temp, "boot_schedule_on");
+                        }
+                        else
+                        {
+                            xTimerReset(enforceTimer, 0);
+                            Indicator::indicateIRSent();
+                            char detail[32];
+                            snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+                            NetworkManager::publishACK("boot_schedule_on", detail);
+                            sysData.lastCommandTime = millis();
+                        }
+                        sysData.acAutoState = AUTO_ON_NORMAL;
+                        if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                            Serial.println("[SCHED] AC ON via schedule, but room is empty. Starting timers.");
+                            if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                            if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                        }
+                        Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
+                                      timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
                     }
-                    sysData.acAutoState = AUTO_ON_NORMAL;
-                    // ---> THE FIX: Jumpstart timers if room is already empty on new segment <---
-                    if (sysData.radarAutoMode && !sysData.cachedPresence) {
-                        Serial.println("[SCHED] AC ON via schedule, but room is empty. Starting timers.");
-                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
-                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
-                    }
-                    Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
-                                  timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
                 }
                 else
                 {
@@ -500,6 +587,7 @@ namespace ScheduleManager
                     }
                     else
                     {
+                        xTimerReset(enforceTimer, 0);
                         Indicator::indicateIRSent();
                         char detail[32];
                         snprintf(detail, sizeof(detail), "state=ON,temp=%d", currentSeg.temp);
@@ -527,12 +615,13 @@ namespace ScheduleManager
             {
                 AutomationManager::executeACCommand(false, 24, "schedule_off");
                 sysData.acAutoState = AUTO_OFF;
-                // Only turn it off automatically if the user didn't manually override it
-                if (sysData.radarAutoMode && !sysData.radarManualOverride) {
+                if (sysData.radarAutoMode) {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
-                    Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
+                    Serial.println("[SCHED] Schedule end: Radar automation disabled.");
                 }
+                sysData.radarManualOverride = false;
+                preferences.putBool("rad_ovr", false);
                 Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
                               timeinfo.tm_hour, timeinfo.tm_min);
             }

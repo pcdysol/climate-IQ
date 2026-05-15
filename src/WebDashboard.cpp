@@ -29,7 +29,7 @@ namespace WebDashboard
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ClimateIQ Setup</title>
+<title>ECO Setup</title>
 <style>
   :root{--bg:#0f1724;--card:#111827;--text:#f8fafc;--acc:#3b82f6;--ok:#10b981;--err:#ef4444;--wait:#eab308;}
   *{box-sizing:border-box;}
@@ -244,7 +244,7 @@ window.onload=function(){refresh();};
 <body>
 <div class="hdr">
   <div>
-    <div class="hdr-title">ClimateIQ Controller</div>
+    <div class="hdr-title">ECO Controller</div>
     <div class="hdr-sub">AP Configuration Mode</div>
   </div>
   <div id="sm" class="badge green">Loading...</div>
@@ -292,7 +292,7 @@ window.onload=function(){refresh();};
     
     <!-- Danger Zone Group -->
     <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">Danger Zone</div>
-    <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doReset('Reset','/reset')">Reset IR Memory</button>
+    <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doReset('/reset')">Reset IR Memory</button>
     <button style="background:#450a0a; color:#f87171; border:1px solid #7f1d1d; margin-bottom:20px;" onclick="if(confirm('Wipe WiFi and Reboot?'))doAct('Wipe WiFi','/resetwifi')">Wipe WiFi Credentials</button>
     
     <!-- System Tools Group -->
@@ -546,9 +546,9 @@ window.onload=function(){refresh();};
                 doc["mv"].to<JsonArray>();
                 doc["sx"].to<JsonArray>();
             }
-            doc["presence"]     = sysData.cachedPresence;
+            doc["presence"]     = (bool)sysData.cachedPresence;
             doc["radar_ready"]  = sysData.sensorReady;
-            doc["radar_auto"]   = sysData.radarAutoMode;
+            doc["radar_auto"]   = (bool)sysData.radarAutoMode;
             doc["normal_temp"]  = sysData.currentNormalTemp;
             doc["eco_temp"]     = sysData.currentEcoTemp;
             doc["eco_time_min"] = (int)(sysData.TEcoTime / 60000);

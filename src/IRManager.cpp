@@ -53,8 +53,8 @@ bool playCustomButton(const char* storageKey) {
                 Serial.println("[IR] ERROR: Failed to acquire IR Mutex!");
             }
 
-            Serial.printf("[IR] Sent Custom Signal: %s\n", storageKey);
-            return true;
+            // Serial.printf("[IR] Sent Custom Signal: %s\n", storageKey);
+            // return true;
         }
     }
     return false;

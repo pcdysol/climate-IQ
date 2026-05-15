@@ -78,8 +78,8 @@ struct SystemData {
 
     // --- Radar State ---
     bool sensorReady = false;
-    bool cachedPresence = false;
-    bool radarAutoMode = false;
+    std::atomic<bool> cachedPresence{false};
+    std::atomic<bool> radarAutoMode{false};
     unsigned long lastRadarDataTime = 0;
 
     // --- Automation Settings ---
@@ -98,8 +98,8 @@ struct SystemData {
     unsigned long flapDelayStart = 0;      // Timestamp of when OFF was sent
     bool isFlapDelayActive = false;        // Flag to enable the blind spot
     // --- State Machine & Scheduling ---
-    AutoState acAutoState = AUTO_OFF;
-    bool isInsideSchedule = false;
+    std::atomic<AutoState> acAutoState{AUTO_OFF};
+    std::atomic<bool> isInsideSchedule{false};
     bool hasAnySchedule = false;
     unsigned long lastCommandTime = 0;
     std::atomic<uint32_t> accumulatedPresenceMs{0};

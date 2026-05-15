@@ -61,7 +61,7 @@ void setup() {
     automationQueue = xQueueCreate(10, sizeof(SystemEvent));
     
     healthTimer = xTimerCreate("HealthTmr", pdMS_TO_TICKS(30000), pdTRUE, (void *)0, HealthManager::HealthTimerCallback);
-    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(900000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
+    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(180000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
     
     // --- ADD THESE TWO TIMERS ---
     // Note: pdFALSE means they only run exactly once per trigger.

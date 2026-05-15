@@ -25,24 +25,40 @@ namespace CommandProcessor {
                 ScheduleManager::handleScheduleCommand(doc); 
                 isValidCommand = true;
             } else {
-                // It is a Manual Temperature change
+                // Resolve target temperature from the command
+                int targetTemp = sysData.currentNormalTemp;
                 if (doc["temperature_setting"]) {
-                    sysData.currentNormalTemp = doc["temperature_setting"].as<int>();
-                    preferences.putInt("normal_temp", sysData.currentNormalTemp);
+                    targetTemp = doc["temperature_setting"].as<int>();
+                    // Inside a schedule the schedule owns currentNormalTemp — updating it here
+                    // would cause radar to re-enter at the wrong temperature after the room empties.
+                    // Send the AC at the requested temp (one-shot) but leave the stored value intact.
+                    if (!sysData.isInsideSchedule) {
+                        sysData.currentNormalTemp = targetTemp;
+                        preferences.putInt("normal_temp", targetTemp);
+                    }
                 }
-                
-                // Blast the IR code (using the backend 'ir' code if provided)
+
+                // IR code overrides the target temp when provided
                 if (doc["ir"]) {
                     int cmdNum = doc["ir"].as<int>();
-                    // Convert cmdNum to actual temp based on your old logic, or just use the setting directly
-                    int targetTemp = (cmdNum >= 3 && cmdNum <= 17) ? (cmdNum + 13) : sysData.currentNormalTemp;
-                    AutomationManager::executeACCommand(true, targetTemp, "manual_temp");
-                } else {
-                    // Fallback to sending the temperature setting directly if 'ir' is missing
-                    AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_temp");
+                    targetTemp = (cmdNum >= 3 && cmdNum <= 17) ? (cmdNum + 13) : targetTemp;
                 }
-                
+                AutomationManager::executeACCommand(true, targetTemp, "manual_temp");
+
                 sysData.acAutoState = AUTO_ON_NORMAL;
+                xTimerStop(ecoTimer, 0);
+                xTimerStop(offTimer, 0);
+                if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                    if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                    if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                }
+                // Outside schedule hours: immediately revert the manual ON
+                if (sysData.hasAnySchedule && !sysData.isInsideSchedule) {
+                    AutomationManager::executeACCommand(false, 24, "outside_schedule");
+                    sysData.acAutoState = AUTO_OFF;
+                    xTimerStop(ecoTimer, 0);
+                    xTimerStop(offTimer, 0);
+                }
                 isValidCommand = true;
             }
         }
@@ -55,6 +71,19 @@ namespace CommandProcessor {
             if (turnOn) {
                 AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_on");
                 sysData.acAutoState = AUTO_ON_NORMAL;
+                xTimerStop(ecoTimer, 0);
+                xTimerStop(offTimer, 0);
+                if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                    if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                    if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                }
+                // Outside schedule hours: immediately revert the manual ON
+                if (sysData.hasAnySchedule && !sysData.isInsideSchedule) {
+                    AutomationManager::executeACCommand(false, 24, "outside_schedule");
+                    sysData.acAutoState = AUTO_OFF;
+                    xTimerStop(ecoTimer, 0);
+                    xTimerStop(offTimer, 0);
+                }
             } else {
                 AutomationManager::executeACCommand(false, 24, "manual_off");
                 sysData.acAutoState = AUTO_OFF;

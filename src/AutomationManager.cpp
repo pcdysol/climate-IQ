@@ -113,12 +113,17 @@ namespace AutomationManager
         {
             if (xQueueReceive(automationQueue, &incomingEvent, portMAX_DELAY) == pdPASS)
             {
-                // 1. Radar Policy Check (Ported from your old main.cpp)
-                // Determines if radar should be blocked outside of schedule hours
+                // Clock validity: epoch < 2021 means NTP has never synced (fresh boot offline).
+                // Without valid time we cannot trust isInsideSchedule, so schedule-based
+                // blocking is suspended until time is known.
+                struct timeval _tv;
+                gettimeofday(&_tv, NULL);
+                bool clockValid = (_tv.tv_sec > 1609459200UL);
+
+                // Radar policy: only block outside-schedule hours when time is actually known.
                 bool blockRadar = false;
-                if (sysData.hasAnySchedule)
+                if (sysData.hasAnySchedule && clockValid)
                 {
-                    // Assuming time is valid if a schedule is active
                     if (!sysData.isInsideSchedule)
                     {
                         uint8_t policy = preferences.getUChar("radar_out_pol", 0);
@@ -191,7 +196,17 @@ namespace AutomationManager
                     break;
 
                 case EVENT_ENFORCE_TRIGGER:
-                    // The Task does the heavy lifting safely!
+                    // Outside schedule hours (and time is known): enforce OFF every 3 min.
+                    // When clock is invalid (offline boot) skip the schedule check so the AC
+                    // state loaded from NVS/radar is not overridden until time is available.
+                    if (clockValid && sysData.hasAnySchedule && !sysData.isInsideSchedule) {
+                        executeACCommand(false, 24, "enforce_off");
+                        sysData.acAutoState = AUTO_OFF;
+                        break;
+                    }
+                    // Inside schedule (or no schedule, or no valid time): re-assert current state.
+                    if (sysData.radarAutoMode && sysData.acAutoState == AUTO_ON_ECO)
+                        break;
                     if (sysData.acAutoState == AUTO_ON_NORMAL)
                         executeACCommand(true, sysData.currentNormalTemp, "enforce_normal");
                     else if (sysData.acAutoState == AUTO_ON_ECO)
@@ -214,15 +229,15 @@ namespace AutomationManager
             return;
 
         unsigned long now = millis();
-        if (sysData.cachedPresence != sysData.lastPresenceState)
+
+        // Accumulate unconditionally every 20ms so the network task only needs exchange(0).
+        // Sensor task is the sole writer of lastPresenceState and lastStateChangeTime.
+        if (sysData.lastPresenceState)
         {
-            if (sysData.lastPresenceState == true)
-            {
-                uint32_t delta = (now - sysData.lastStateChangeTime);
-                sysData.accumulatedPresenceMs.fetch_add(delta, std::memory_order_relaxed);
-            }
-            sysData.lastPresenceState = sysData.cachedPresence;
-            sysData.lastStateChangeTime = now;
+            uint32_t delta = now - sysData.lastStateChangeTime;
+            sysData.accumulatedPresenceMs.fetch_add(delta, std::memory_order_relaxed);
         }
+        sysData.lastStateChangeTime = now;
+        sysData.lastPresenceState = sysData.cachedPresence.load(std::memory_order_relaxed);
     }
 }

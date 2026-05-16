@@ -107,6 +107,7 @@ namespace SensorManager
             uint8_t movingSig = radar.movingTargetSignal();
             uint8_t statSig = radar.stationaryTargetSignal();
             // --- FLAP DELAY SUPPRESSION ---
+            bool flapJustExpired = false;
             if (globalState->isFlapDelayActive) {
                 if (millis() - globalState->flapDelayStart < (globalState->flapDelaySec * 1000)) {
                     // Force the radar values to 0 while the flap is closing
@@ -116,6 +117,7 @@ namespace SensorManager
                 } else {
                     // Timer expired, resume normal radar operation
                     globalState->isFlapDelayActive = false;
+                    flapJustExpired = true;
                     Serial.println("[SENSOR] Flap delay expired. Resuming radar detection.");
                 }
             }
@@ -156,15 +158,22 @@ namespace SensorManager
                 isVarianceNoise = false;
             }
 
-            if (isVarianceNoise ? false : rawPresence != globalState->cachedPresence)
-            {
-                // The state changed!
-                globalState->cachedPresence = (isVarianceNoise ? false : rawPresence);
+            bool newPresence = isVarianceNoise ? false : rawPresence;
+            bool presenceChanged = (newPresence != globalState->cachedPresence);
 
-                // Send a message to the Automation Queue
+            // Fire EVENT_PRESENCE_CHANGED when:
+            //  (a) the presence state actually changed, OR
+            //  (b) the flap delay just expired — this guarantees downstream timers
+            //      are reconciled with reality even when cachedPresence was already
+            //      false (e.g. room was empty during a schedule delete+create), so
+            //      the eco/off cycle still starts correctly per the user's settings.
+            if (presenceChanged || flapJustExpired)
+            {
+                globalState->cachedPresence = newPresence;
+
                 SystemEvent event;
                 event.type = EVENT_PRESENCE_CHANGED;
-                event.payload = globalState->cachedPresence ? 1 : 0;
+                event.payload = newPresence ? 1 : 0;
 
                 // Push it to the queue (don't block if full)
                 xQueueSend(automationQueue, &event, 0);

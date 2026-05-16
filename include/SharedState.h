@@ -94,6 +94,7 @@ struct SystemData {
     bool lastPresenceState = false;
     unsigned long lastStateChangeTime = 0;
     // --- Automation Settings ---
+    bool isOfflineFailsafeActive = false;  // <--- ADD THIS
     unsigned long flapDelaySec = 10;       // Customizable seconds to ignore radar
     unsigned long flapDelayStart = 0;      // Timestamp of when OFF was sent
     bool isFlapDelayActive = false;        // Flag to enable the blind spot

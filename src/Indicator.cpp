@@ -69,6 +69,11 @@ namespace Indicator
         {
             digitalWrite(LED_PIN, LOW);
         }
+        // ---> ADD PRIORITY OVERRIDE HERE <---
+        if (sysData.isOfflineFailsafeActive) {
+            setColor(1, 0, 1); // Solid Magenta (Red + Blue)
+            return; // Exit early to guarantee nothing overlaps this!
+        }
 
         static unsigned long lastBlink = 0;
         static bool ledState = false;

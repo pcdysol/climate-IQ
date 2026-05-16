@@ -317,12 +317,14 @@ namespace ScheduleManager
             }
 
             // Backend may send these as strings ("1") or integers (1) — handle both.
-            auto jToU8 = [](JsonVariant val) -> uint8_t {
-                if (val.is<int>()) return (uint8_t)val.as<int>();
-                const char* s = val | "";
+            auto jToU8 = [](JsonVariant val) -> uint8_t
+            {
+                if (val.is<int>())
+                    return (uint8_t)val.as<int>();
+                const char *s = val | "";
                 return (uint8_t)atoi(s);
             };
-            uint8_t segEco  = jToU8(v["eco"]);
+            uint8_t segEco = jToU8(v["eco"]);
             uint8_t segTeco = jToU8(v["teco"]);
             uint8_t segToff = jToU8(v["toff"]);
 
@@ -383,14 +385,20 @@ namespace ScheduleManager
                 sysData.currentNormalTemp = seg.temp;
                 preferences.putInt("normal_temp", seg.temp);
 
-                if (sysData.acAutoState != AUTO_ON_NORMAL)
+                if (sysData.acAutoState == AUTO_ON_ECO)
                 {
-                    // AC is in eco or sensor-off state — update settings silently, no IR
-                    Serial.printf("[SCHED] Schedule updated while AC in managed state (%s). Settings applied, no IR sent.\n",
-                                  sysData.acAutoState == AUTO_ON_ECO ? "eco" : "off");
+                    // Radar already drove AC to eco — silently update settings, let radar continue managing.
+                    // (Only AUTO_ON_ECO is "managed by radar"; AUTO_OFF after a delete must be re-entered.)
+                    Serial.println("[SCHED] Schedule updated while in eco mode. Settings applied, no IR sent.");
                 }
                 else
                 {
+                    // AUTO_OFF (e.g. after a delete) or AUTO_ON_NORMAL: enter/re-assert segment normally.
+                    // Stop any stale eco/off timers — when AC is turning ON, no countdown should be running.
+                    // These will be re-started below ONLY if the room is genuinely empty.
+                    xTimerStop(ecoTimer, 0);
+                    xTimerStop(offTimer, 0);
+
                     if (!sendScheduleIR(wday, seg.temp))
                     {
                         AutomationManager::executeACCommand(true, seg.temp, "schedule_update");
@@ -405,10 +413,17 @@ namespace ScheduleManager
                         sysData.lastCommandTime = millis();
                     }
                     sysData.acAutoState = AUTO_ON_NORMAL;
-                    if (sysData.radarAutoMode && !sysData.cachedPresence)
+
+                    // Start eco/off timers ONLY if room is genuinely empty.
+                    // If flap delay is active (e.g. delete just ran), cachedPresence is artificially
+                    // forced to false and we cannot trust it. SensorManager will fire a presence event
+                    // when the flap delay expires, which will start timers correctly if needed.
+                    if (sysData.radarAutoMode && !sysData.cachedPresence && !sysData.isFlapDelayActive)
                     {
-                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
-                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                        if (sysData.TEcoTime > 0)
+                            xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                        if (sysData.TOffTime > 0)
+                            xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                     }
                 }
             }
@@ -416,7 +431,8 @@ namespace ScheduleManager
             {
                 AutomationManager::executeACCommand(false, 24, "schedule_update_off");
                 sysData.acAutoState = AUTO_OFF;
-                if (sysData.radarAutoMode) {
+                if (sysData.radarAutoMode)
+                {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
                     Serial.println("[SCHED] Schedule update: outside segments, radar disabled.");
@@ -438,18 +454,44 @@ namespace ScheduleManager
 
     void TaskSchedule(void *pvParameters)
     {
+        // Track boot time for the offline failsafe
+        static unsigned long offlineBootStart = millis();
+        static bool offlineFailsafeTriggered = false;
+
         for (;;)
         {
             struct timeval tv;
             gettimeofday(&tv, NULL);
 
             // 1. Time validity check: If epoch is before 2021, NTP hasn't synced.
-            // Wait 5 seconds and check again.
             if (tv.tv_sec < 1609459200)
             {
+                // --- ROBUST OFFLINE FAILSAFE ---
+                // If 60 seconds have passed and we still have no network time,
+                // prioritize local automation and force the radar to take over.
+                if (!offlineFailsafeTriggered && (millis() - offlineBootStart > 60000))
+                {
+                    Serial.println("[SCHED] Offline timeout! Prioritizing local automation. Forcing radar ON.");
+                    sysData.radarAutoMode = true;
+                    offlineFailsafeTriggered = true;
+                    sysData.isOfflineFailsafeActive = true; // <--- ADD THIS: Turn on Magenta
+
+                    // Push an event to the queue immediately.
+                    // This ensures the AC turns on if you are already standing in the room!
+                    SystemEvent event;
+                    event.type = EVENT_PRESENCE_CHANGED;
+                    event.payload = sysData.cachedPresence ? 1 : 0;
+                    xQueueSend(automationQueue, &event, 0);
+                }
+
                 vTaskDelay(pdMS_TO_TICKS(5000));
                 continue;
             }
+
+            // Once time is valid, reset the tracker so we know we are online
+            offlineFailsafeTriggered = false;
+
+            sysData.isOfflineFailsafeActive = false; // <--- ADD THIS: Turn off Magenta
 
             // 2. Calculate EXACT milliseconds until the top of the next minute (00 seconds)
             int current_sec = tv.tv_sec % 60;
@@ -462,7 +504,8 @@ namespace ScheduleManager
             // --- WAKING UP: It is now exactly XX:XX:00 ---
 
             struct tm timeinfo;
-            if (!getLocalTime(&timeinfo, 0)) continue;
+            if (!getLocalTime(&timeinfo, 0))
+                continue;
 
             int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
             int currentWday = timeinfo.tm_wday;
@@ -476,14 +519,32 @@ namespace ScheduleManager
 
             lastScheduledMin = currentMin;
             lastScheduledWday = currentWday;
-            
+
             // ... The rest of your existing logic starts here
             if (isBootRun)
             {
                 uint8_t count = loadSegmentCount(currentWday);
                 if (count == 0)
                 {
-                    sysData.isInsideSchedule = false; // <--- ADD THIS
+                    sysData.isInsideSchedule = false;
+
+                    // --- FAILSAFE RECOVERY SHUTDOWN ---
+                    // If the failsafe was running, but today has no schedules at all,
+                    // we must explicitly kill the radar and turn the AC off.
+                    if (sysData.radarAutoMode)
+                    {
+                        sysData.radarAutoMode = false;
+                        preferences.putBool("radar_auto", false);
+                        Serial.println("[SCHED] Recovery: No schedules for today. Radar disabled.");
+
+                        if (!IRManager::playCustomButton("ir_off"))
+                            IRManager::sendACFallback(false, 24);
+
+                        sysData.acAutoState = AUTO_OFF;
+                        Indicator::indicateIRSent();
+                    }
+                    // ----------------------------------
+
                     continue;
                 }
                 ScheduleSegment seg;
@@ -500,8 +561,8 @@ namespace ScheduleManager
                     // AUTO_OFF with lastCommandTime > 0 means radar drove the AC off (not boot default).
                     AutoState curState = sysData.acAutoState.load();
                     bool radarDroveOff = sysData.radarAutoMode &&
-                                        (curState == AUTO_ON_ECO ||
-                                        (curState == AUTO_OFF && sysData.lastCommandTime > 0));
+                                         (curState == AUTO_ON_ECO ||
+                                          (curState == AUTO_OFF && sysData.lastCommandTime > 0));
 
                     if (radarDroveOff)
                     {
@@ -532,10 +593,13 @@ namespace ScheduleManager
                             sysData.lastCommandTime = millis();
                         }
                         sysData.acAutoState = AUTO_ON_NORMAL;
-                        if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                        if (sysData.radarAutoMode && !sysData.cachedPresence)
+                        {
                             Serial.println("[SCHED] AC ON via schedule, but room is empty. Starting timers.");
-                            if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
-                            if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                            if (sysData.TEcoTime > 0)
+                                xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                            if (sysData.TOffTime > 0)
+                                xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                         }
                         Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
                                       timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
@@ -548,12 +612,13 @@ namespace ScheduleManager
                         IRManager::sendACFallback(false, 24);
                     sysData.acAutoState = AUTO_OFF;
                     // ---> ADD THIS BLOCK: Hard toggle radar OFF <---
-                if (sysData.radarAutoMode) {
-                    sysData.radarAutoMode = false;
-                    preferences.putBool("radar_auto", false);
-                    Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
-                }
-                // -----------------------------------------------
+                    if (sysData.radarAutoMode)
+                    {
+                        sysData.radarAutoMode = false;
+                        preferences.putBool("radar_auto", false);
+                        Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
+                    }
+                    // -----------------------------------------------
                     Indicator::indicateIRSent();
                     Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
                                   timeinfo.tm_hour, timeinfo.tm_min);
@@ -596,10 +661,13 @@ namespace ScheduleManager
                     }
                     sysData.acAutoState = AUTO_ON_NORMAL;
                     // ---> THE FIX: Jumpstart timers if room is already empty on boot <---
-                    if (sysData.radarAutoMode && !sysData.cachedPresence) {
+                    if (sysData.radarAutoMode && !sysData.cachedPresence)
+                    {
                         Serial.println("[SCHED] AC ON via boot schedule, but room is empty. Starting timers.");
-                        if (sysData.TEcoTime > 0) xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
-                        if (sysData.TOffTime > 0) xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                        if (sysData.TEcoTime > 0)
+                            xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
+                        if (sysData.TOffTime > 0)
+                            xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                     }
                     Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
                                   timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
@@ -615,7 +683,8 @@ namespace ScheduleManager
             {
                 AutomationManager::executeACCommand(false, 24, "schedule_off");
                 sysData.acAutoState = AUTO_OFF;
-                if (sysData.radarAutoMode) {
+                if (sysData.radarAutoMode)
+                {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
                     Serial.println("[SCHED] Schedule end: Radar automation disabled.");

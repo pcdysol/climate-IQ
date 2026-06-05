@@ -16,11 +16,12 @@ namespace SensorManager {
     void attemptHDCRecovery();
     void attemptRadarRecovery();
 
-    // Calibration commands (returns true on success)
-    bool calibrateRadarAuto();
-    bool calibrateRadarReset();
-    // Add these to fetch the live radar gate arrays
-    const MyLD2410::ValuesArray& getMovingSignals();
-    const MyLD2410::ValuesArray& getStationarySignals();
+    // Web-triggered radar maintenance. These only signal the sensor task (the only
+    // owner of the radar UART) and return immediately. Progress/result is reported
+    // through SystemData::radarCalStatus (poll getCalStatus()).
+    bool requestCalibration();        // auto-threshold calibration (room must be empty)
+    bool requestRadarFactoryReset();  // reset radar to factory defaults
+    int  getCalStatus();              // 0 idle, 1 in progress, 2 success, 3 failed
+
     void TaskSensors(void *pvParameters);
 }

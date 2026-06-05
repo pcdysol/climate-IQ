@@ -77,7 +77,9 @@ void setup() {
 
     // 4. Spin up FreeRTOS Tasks
     // Arguments: Function, Name, Stack Size, Params, Priority, Task Handle, Core
-    xTaskCreatePinnedToCore(SensorManager::TaskSensors, "SensorsTask", 4096, NULL, 3, NULL, 1);
+    // NOTE: capture the handle (&sensorsTaskHandle) — health recovery and the web
+    // calibrate/reset triggers all xTaskNotify() this task; with NULL it stays unset.
+    xTaskCreatePinnedToCore(SensorManager::TaskSensors, "SensorsTask", 4096, NULL, 3, &sensorsTaskHandle, 1);
     xTaskCreatePinnedToCore(WebDashboard::TaskWeb,     "WebTask",     4096, NULL, 1, NULL, 0); 
 
     // 3. Network Boot

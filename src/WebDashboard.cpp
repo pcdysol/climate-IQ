@@ -144,21 +144,7 @@ async function saveSt(){
     alert('Saved! Device is rebooting.');
   }
 }
-async function doCal(ep){
-  const lg=document.getElementById('alog');
-  document.querySelectorAll('button').forEach(b=>b.disabled=true);
-  sui('Calibrating...','yellow');
-  lg.innerText=ep.includes('auto')?'> EMPTY the room — calibration takes up to 120s...':'> Sending factory reset to radar...';
-  lg.style.color='var(--wait)';
-  try{
-    const res=await fetch(ep);const txt=await res.text();
-    lg.innerText='> '+txt;
-    if(res.ok){lg.style.color='var(--ok)';sui('Done','green');}
-    else{lg.style.color='var(--err)';sui('Failed','red');}
-  }catch(e){lg.innerText='> Network Error!';lg.style.color='var(--err)';sui('Error','red');}
-  document.querySelectorAll('button').forEach(b=>b.disabled=false);
-  setTimeout(()=>{sui('System Ready','green');lg.innerText='> Ready';lg.style.color='var(--ok)';},5000);
-}
+
 var dpt=null;
 function openDM(){document.getElementById('dm').style.display='flex';setTimeout(()=>document.getElementById('dpi').focus(),50);document.getElementById('de').style.display='none';}
 function closeDM(){document.getElementById('dm').style.display='none';document.getElementById('dpi').value='';}
@@ -179,13 +165,38 @@ function closeDP(){
   document.getElementById('dpanel').style.display='none';
   if(dpt){clearInterval(dpt);dpt=null;}
 }
+async function doCal(ep){
+  const lg=document.getElementById('alog');
+  const isAuto=ep.includes('auto');
+  document.querySelectorAll('button').forEach(b=>b.disabled=true);
+  sui(isAuto?'Calibrating...':'Resetting...','yellow');
+  lg.innerText=isAuto?'> EMPTY the room — waiting for radar to finish...':'> Sending factory reset to radar...';
+  lg.style.color='var(--wait)';
+  try{
+    const res=await fetch(ep);const txt=await res.text();
+    lg.innerText='> '+txt;
+    if(!res.ok)throw new Error(txt);
+    // No hardcoded duration — poll the radar's own status until it reports done/fail.
+    const start=Date.now();
+    while(Date.now()-start<200000){
+      await new Promise(r=>setTimeout(r,1000));
+      let s;try{s=await(await fetch('/calibrate/status')).json();}catch(e){continue;}
+      if(s.status===1){lg.innerText='> Radar '+(isAuto?'calibrating':'resetting')+'… '+Math.round((Date.now()-start)/1000)+'s';continue;}
+      if(s.status===2){lg.style.color='var(--ok)';sui('Done','green');lg.innerText='> '+(isAuto?'Calibration complete.':'Radar reset complete.');break;}
+      if(s.status===3){lg.style.color='var(--err)';sui('Failed','red');lg.innerText='> Radar reported failure.';break;}
+      lg.style.color='var(--ok)';sui('Done','green');break; // status 0 = cleared/done
+    }
+  }catch(e){lg.innerText='> '+(e.message||'Network Error!');lg.style.color='var(--err)';sui('Error','red');}
+  document.querySelectorAll('button').forEach(b=>b.disabled=false);
+  setTimeout(()=>{sui('System Ready','green');lg.innerText='> Ready';lg.style.color='var(--ok)';},4000);
+}
 function buildGates(cid,arr,isMv){
   var clr=isMv?'linear-gradient(90deg,#2563eb,#60a5fa)':'linear-gradient(90deg,#7c3aed,#a78bfa)';
   var h='';
   for(var i=0;i<arr.length;i++){
     var v=arr[i],p=Math.min(v,100);
     h+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px;">'
-      +'<span style="font-family:monospace;font-size:0.68rem;color:#64748b;width:16px;flex-shrink:0;">G'+i+'</span>'
+      +'<span style="font-family:monospace;font-size:0.68rem;color:#64748b;width:18px;flex-shrink:0;">G'+i+'</span>'
       +'<div style="flex:1;background:#0f172a;border-radius:3px;height:13px;overflow:hidden;">'
         +'<div style="width:'+p+'%;height:100%;background:'+clr+';border-radius:3px;transition:width .35s;"></div>'
       +'</div>'
@@ -197,9 +208,11 @@ function buildGates(cid,arr,isMv){
 async function pollD(){
   try{
     var d=await(await fetch('/devdata')).json();
+    var pr=document.getElementById('dpres');
+    var distEl=document.getElementById('dradar-dist');
+    if(distEl)distEl.innerText=d.radar_distance!=null?(d.radar_distance.toFixed(0)+' cm'):'--';
     if(d.mv&&d.mv.length)buildGates('mv-gates',d.mv,true);
     if(d.sx&&d.sx.length)buildGates('st-gates',d.sx,false);
-    var pr=document.getElementById('dpres');
     pr.innerText=d.presence?'DETECTED':'EMPTY';
     pr.className='badge '+(d.presence?'green':'red');
     var ids=['inp-nt','inp-et','inp-etime','inp-otime','inp-fdelay'];
@@ -252,6 +265,9 @@ window.onload=function(){refresh();};
 <div class="wrap">
 <div class="grid">
 
+  <!-- Column 1: stacked so System Admin sits directly under System Overview
+       (otherwise System Overview stretches to the tall IR card, leaving a gap) -->
+  <div style="display:flex;flex-direction:column;gap:18px;">
   <div class="card">
     <h3>System Overview</h3>
     <div class="sp">
@@ -261,6 +277,21 @@ window.onload=function(){refresh();};
       <div class="sr" style="border:none;"><div class="sl">Saved Buttons</div><div id="sk">Loading...</div></div>
     </div>
   </div>
+
+  <div class="card">
+    <h3>System Admin</h3>
+
+    <!-- Danger Zone Group -->
+    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">Danger Zone</div>
+    <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doReset('/reset')">Reset IR Memory</button>
+    <button style="background:#450a0a; color:#f87171; border:1px solid #7f1d1d; margin-bottom:20px;" onclick="if(confirm('Wipe WiFi and Reboot?'))doAct('Wipe WiFi','/resetwifi')">Wipe WiFi Credentials</button>
+
+    <!-- System Tools Group -->
+    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">System Tools</div>
+    <button class="btn-v" onclick="window.location.href='/update'">OTA Firmware Update</button>
+    <button style="background:#1e293b; color:#cbd5e1; border:1px solid #334155;" onclick="openDM()">&#128295; Developer Mode</button>
+  </div>
+  </div><!-- /column 1 -->
 
   <div class="card">
     <h3>IR Learning Center</h3>
@@ -274,6 +305,9 @@ window.onload=function(){refresh();};
       <button class="btn-v" style="background:#5b21b6;" onclick="doAct('28C','/learn/28')">Learn 28&#176;C</button>
       <button class="btn-v" style="background:#5b21b6;" onclick="doAct('30C','/learn/30')">Learn 30&#176;C</button>
     </div>
+    <div style="font-size:0.72rem;color:#64748b;margin-top:18px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;">Radar Calibration</div>
+    <button class="btn-p" onclick="if(confirm('EMPTY the room first. Continue?'))doCal('/calibrate/auto')">Auto-Calibrate</button>
+    <button class="btn-w" onclick="if(confirm('Reset radar to factory defaults?'))doCal('/calibrate/reset')">Factory Reset Radar</button>
   </div>
 
   <div class="card">
@@ -285,30 +319,6 @@ window.onload=function(){refresh();};
     <div class="sl" style="margin-bottom:4px;">WiFi Password</div>
     <input type="password" id="np" placeholder="Enter Password" style="margin-bottom:0;">
     <button class="btn-w" style="margin-top:12px;" onclick="saveSt()">Save &amp; Reboot</button>
-  </div>
-
-  <div class="card">
-    <h3>System Admin</h3>
-    
-    <!-- Danger Zone Group -->
-    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">Danger Zone</div>
-    <button class="btn-d" onclick="if(confirm('Wipe all saved IR data?'))doReset('/reset')">Reset IR Memory</button>
-    <button style="background:#450a0a; color:#f87171; border:1px solid #7f1d1d; margin-bottom:20px;" onclick="if(confirm('Wipe WiFi and Reboot?'))doAct('Wipe WiFi','/resetwifi')">Wipe WiFi Credentials</button>
-    
-    <!-- System Tools Group -->
-    <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">System Tools</div>
-    <button class="btn-v" onclick="window.location.href='/update'">OTA Firmware Update</button>
-    <button style="background:#1e293b; color:#cbd5e1; border:1px solid #334155;" onclick="openDM()">&#128295; Developer Mode</button>
-  </div>
-
-  <div class="card">
-    <h3>Radar Calibration</h3>
-    <p style="font-size:0.82rem;color:#94a3b8;margin-top:0;line-height:1.6;">
-      <b style="color:var(--text);">Auto-Calibrate:</b> Room must be completely empty. Sensor learns ambient noise floor and sets thresholds automatically (firmware &ge; 2.44). Up to 120 seconds.<br><br>
-      <b style="color:var(--text);">Factory Reset:</b> Wipes learned thresholds back to HLK defaults. Use if auto-calibrate produces false triggers.
-    </p>
-    <button class="btn-p" onclick="if(confirm('EMPTY the room first. Continue?'))doCal('/calibrate/auto')">Auto-Calibrate (Recommended)</button>
-    <button class="btn-w" onclick="if(confirm('Reset radar to factory defaults?'))doCal('/calibrate/reset')">Factory Reset Radar</button>
   </div>
 
 </div>
@@ -326,12 +336,16 @@ window.onload=function(){refresh();};
         <div id="dpres" class="badge red">EMPTY</div>
       </div>
       <div style="margin-top:8px;">
-        <div class="sl" style="margin-bottom:5px;">Moving Energy (per gate)</div>
-        <div id="mv-gates"><span style="color:#475569;font-size:0.8rem;">Waiting for data...</span></div>
+        <div class="sl" style="margin-bottom:5px;">Target Distance</div>
+        <div id="dradar-dist" style="font-family:monospace;font-size:1.1rem;color:var(--acc);">--</div>
+      </div>
+      <div style="margin-top:14px;">
+        <div class="sl" style="margin-bottom:5px;">Moving Energy / Gate</div>
+        <div id="mv-gates"><span style="color:#475569;font-size:0.75rem;">Waiting for data…</span></div>
       </div>
       <div style="margin-top:12px;">
-        <div class="sl" style="margin-bottom:5px;">Stationary Energy (per gate)</div>
-        <div id="st-gates"><span style="color:#475569;font-size:0.8rem;">Waiting for data...</span></div>
+        <div class="sl" style="margin-bottom:5px;">Static Energy / Gate</div>
+        <div id="st-gates"><span style="color:#475569;font-size:0.75rem;">Waiting for data…</span></div>
       </div>
     </div>
     <div class="card">
@@ -510,17 +524,38 @@ window.onload=function(){refresh();};
             pendingReboot = true;
             rebootTime = millis() + 2000; });
 
-    // Sensor Endpoints
-    server.on("/calibrate/auto", HTTP_GET, []()
-              { SensorManager::calibrateRadarAuto(); });
-    server.on("/calibrate/reset", HTTP_GET, []()
-              { SensorManager::calibrateRadarReset(); });
-
     server.on("/devauth", HTTP_GET, []()
               {
             String pass = server.hasArg("pass") ? server.arg("pass") : "";
             JsonDocument doc;
             doc["ok"] = (pass == String(DEV_PASSWORD));
+            String json;
+            serializeJson(doc, json);
+            server.send(200, "application/json; charset=utf-8", json); });
+
+    // --- Radar maintenance: trigger on the sensor task, report real status ---
+    server.on("/calibrate/auto", HTTP_GET, []()
+              {
+            if (SensorManager::requestCalibration())
+                server.send(200, "text/plain", "Calibration started. Keep the room empty.");
+            else
+                server.send(409, "text/plain", "Radar not ready or busy. Try again."); });
+
+    server.on("/calibrate/reset", HTTP_GET, []()
+              {
+            if (SensorManager::requestRadarFactoryReset())
+                server.send(200, "text/plain", "Factory reset sent to radar.");
+            else
+                server.send(409, "text/plain", "Radar busy. Try again."); });
+
+    server.on("/calibrate/status", HTTP_GET, []()
+              {
+            int s = SensorManager::getCalStatus();
+            const char* txt = (s == 0) ? "idle" : (s == 1) ? "in progress"
+                            : (s == 2) ? "success" : "failed";
+            JsonDocument doc;
+            doc["status"] = s;
+            doc["text"] = txt;
             String json;
             serializeJson(doc, json);
             server.send(200, "application/json; charset=utf-8", json); });
@@ -535,19 +570,17 @@ window.onload=function(){refresh();};
         doc["nvs_free_entries"] = nvs_stats.free_entries;
         doc["nvs_total_entries"] = nvs_stats.total_entries;
         // ----------------------------
-            if (sysData.sensorReady) {
-                const MyLD2410::ValuesArray& mvSig = SensorManager::getMovingSignals(); 
-                const MyLD2410::ValuesArray& stSig = SensorManager::getStationarySignals(); 
-                JsonArray mvArr = doc["mv"].to<JsonArray>();
-                JsonArray stArr = doc["sx"].to<JsonArray>();
-                for (int i = 0; i <= mvSig.N; i++) mvArr.add((int)mvSig.values[i]);
-                for (int i = 0; i <= stSig.N; i++) stArr.add((int)stSig.values[i]);
-            } else {
-                doc["mv"].to<JsonArray>();
-                doc["sx"].to<JsonArray>();
-            }
+            doc["radar_distance"] = sysData.radarDistance;
             doc["presence"]     = (bool)sysData.cachedPresence;
             doc["radar_ready"]  = sysData.sensorReady;
+
+            // --- Per-gate energy for the live radar feed ---
+            JsonArray mv = doc["mv"].to<JsonArray>();
+            JsonArray sx = doc["sx"].to<JsonArray>();
+            for (uint8_t i = 0; i < sysData.radarGateCount && i < 14; i++) {
+                mv.add(sysData.radarMovingEnergy[i]);
+                sx.add(sysData.radarStaticEnergy[i]);
+            }
             doc["radar_auto"]   = (bool)sysData.radarAutoMode;
             doc["normal_temp"]  = sysData.currentNormalTemp;
             doc["eco_temp"]     = sysData.currentEcoTemp;

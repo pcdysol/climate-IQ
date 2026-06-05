@@ -310,6 +310,7 @@ namespace WiFiManager
             mac["TOffTime"] = sysData.TOffTime / 60000;
             mac["temperature"] = temperature;
             mac["humidity"] = humidity;
+            mac["radar_distance"] = sysData.radarDistance;
             mac["status"] = "Online";
 
             if (!bootReasonReported)

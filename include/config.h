@@ -50,10 +50,8 @@
 // ===================== 3.SENSOR & HEALTH TIMINGS ====================
 // ====================================================================
 
-// ===== Radar LD2410 Settings =====
+// ===== Radar LD2412 Settings =====
 #define RADAR_STALE_MS          30000 // 30s without a frame = radar is hung
-#define VARIANCE_SAMPLES        20
-#define VARIANCE_THRESHOLD      2
 
 // ===== HDC1080 Settings =====
 #define HDC_REINIT_THRESHOLD    3         // Attempt I2C reset after this many consecutive NaN reads

@@ -81,6 +81,18 @@ struct SystemData {
     std::atomic<bool> cachedPresence{false};
     std::atomic<bool> radarAutoMode{false};
     unsigned long lastRadarDataTime = 0;
+    float radarDistance = 0.0;
+
+    // --- Radar Live Engineering Data (per-gate energy, LD2412 = 14 gates) ---
+    // Written by the sensor task in poll(), read by the web task for the dev feed.
+    // Torn reads are harmless here (diagnostic only, values 0-100).
+    uint8_t radarMovingEnergy[14] = {0};
+    uint8_t radarStaticEnergy[14] = {0};
+    uint8_t radarGateCount = 0;
+
+    // --- Web-triggered radar maintenance (executed on the sensor task) ---
+    // 0 = idle, 1 = in progress, 2 = success, 3 = failed
+    std::atomic<int> radarCalStatus{0};
 
     // --- Automation Settings ---
     int currentNormalTemp = 24;

@@ -37,6 +37,12 @@ namespace LD2410
   const byte autoQuery[4]{2, 0, 0x1B, 0};
   byte gateParam[0x16]{0x14, 0, 0x64, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0};
   byte maxGate[0x16]{0x14, 0, 0x60, 0, 0, 0, 8, 0, 0, 0, 1, 0, 8, 0, 0, 0, 2, 0, 5, 0, 0, 0};
+  // LD2412 "basic parameter configuration" (datasheet 2.2.5), command 0x0002. The
+  // LD2412 does NOT use the LD2410's 0x0060 maxGate command. Value = 5 bytes:
+  // [4]=min gate, [5]=max gate, [6..7]=unmanned duration (s), [8]=out-pin polarity.
+  // min/out-pin are preserved from the last 0x0012 query (parsed in processAck).
+  byte basicParam[9]{7, 0, 0x02, 0, 1, 0x0E, 5, 0, 0}; // defaults: min gate 1, max gate 14
+  const byte basicQuery[4]{2, 0, 0x12, 0}; // LD2412 query basic parameters (ACK 0x0112)
 
   String byte2hex(byte b, bool addZero = true)
   {
@@ -219,6 +225,12 @@ bool MyLD2410::processAck()
     noOne_window = inBuf[nStart] | (inBuf[nStart + 1] << 8);
     break;
   }
+  case 0x112: // LD2412 query basic parameters (min gate, max gate, duration, out pin)
+    LD2410::basicParam[4] = inBuf[4]; // min distance gate — preserve for set
+    maxRange = inBuf[5];              // max distance gate
+    noOne_window = inBuf[6] | (inBuf[7] << 8);
+    LD2410::basicParam[8] = inBuf[8]; // out-pin polarity — preserve for set
+    break;
   case 0x162:
     isEnhanced = true;
     break;
@@ -594,9 +606,11 @@ bool MyLD2410::setResolution(bool fine)
 
 bool MyLD2410::requestParameters()
 {
+  // LD2412 reads basic params (min/max gate, duration, out pin) via 0x0012, not the
+  // LD2410's 0x0061. The ACK 0x0112 sets maxRange / noOne_window (see processAck).
   if (isConfig)
-    return sendCommand(LD2410::param);
-  return configMode() && sendCommand(LD2410::param) && configMode(false);
+    return sendCommand(LD2410::basicQuery);
+  return configMode() && sendCommand(LD2410::basicQuery) && configMode(false);
 }
 
 bool MyLD2410::setGateParameters(byte gate, byte movingThreshold, byte stationaryThreshold)
@@ -643,17 +657,26 @@ bool MyLD2410::setStationaryThreshold(byte gate, byte stationaryThreshold)
 
 bool MyLD2410::setMaxGate(byte movingGate, byte staticGate, byte noOneWindow)
 {
-  if (movingGate > 8)
-    movingGate = 8;
-  if (staticGate > 8)
-    staticGate = 8;
-  byte *cmd = LD2410::maxGate;
-  cmd[6] = movingGate;
-  cmd[12] = staticGate;
-  cmd[18] = noOneWindow;
+  // LD2412 uses ONE max distance gate via command 0x0002 (datasheet 2.2.5), not the
+  // LD2410's separate moving/static gates (0x0060, which the LD2412 ignores). Use the
+  // larger of the two requested gates. Gates are 0-13 (→ "gate 1-14", 0.75 m each).
+  byte maxGate = (movingGate > staticGate) ? movingGate : staticGate;
+  // Gate value is the gate NUMBER (1-14), distance = value * 0.75 m.
+  if (maxGate > 14)
+    maxGate = 14;
+  if (maxGate < 1)
+    maxGate = 1;
+  // Pull current params first so we preserve the min gate and out-pin polarity
+  // (parsed into basicParam[4]/[8] by the 0x0112 ACK handler).
+  if (!maxRange)
+    requestParameters();
+  byte *cmd = LD2410::basicParam;
+  cmd[5] = maxGate;                       // max distance gate
+  cmd[6] = noOneWindow & 0xFF;            // unmanned duration (low byte)
+  cmd[7] = (noOneWindow >> 8) & 0xFF;     // unmanned duration (high byte)
   if (isConfig && sendCommand(cmd))
-    return sendCommand(LD2410::param);
-  return configMode() && sendCommand(cmd) && sendCommand(LD2410::param) && configMode(false);
+    return sendCommand(LD2410::basicQuery);
+  return configMode() && sendCommand(cmd) && sendCommand(LD2410::basicQuery) && configMode(false);
 }
 
 bool MyLD2410::setGateParameters(

@@ -104,6 +104,29 @@ namespace AutomationManager
         xQueueSend(automationQueue, &event, 0);
     }
 
+    // Re-assert the AC to the state the system believes it should be in.
+    // Shared by the 3-minute enforce timer and the immediate manual-override
+    // reaction. `clockValid` must be passed in (computed once per event loop).
+    static void enforceCurrentState(bool clockValid)
+    {
+        // Outside schedule hours (and time is known): force OFF.
+        if (clockValid && sysData.hasAnySchedule && !sysData.isInsideSchedule)
+        {
+            executeACCommand(false, 24, "enforce_off");
+            sysData.acAutoState = AUTO_OFF;
+            return;
+        }
+        // Inside schedule (or no schedule, or no valid time): re-assert current state.
+        if (sysData.radarAutoMode && sysData.acAutoState == AUTO_ON_ECO)
+            return;
+        if (sysData.acAutoState == AUTO_ON_NORMAL)
+            executeACCommand(true, sysData.currentNormalTemp, "enforce_normal");
+        else if (sysData.acAutoState == AUTO_ON_ECO)
+            executeACCommand(true, sysData.currentEcoTemp, "enforce_eco");
+        else if (sysData.acAutoState == AUTO_OFF)
+            executeACCommand(false, 24, "enforce_off");
+    }
+
     // 2. The Main Automation Task
     void TaskAutomation(void *pvParameters)
     {
@@ -196,23 +219,18 @@ namespace AutomationManager
                     break;
 
                 case EVENT_ENFORCE_TRIGGER:
-                    // Outside schedule hours (and time is known): enforce OFF every 3 min.
-                    // When clock is invalid (offline boot) skip the schedule check so the AC
-                    // state loaded from NVS/radar is not overridden until time is available.
-                    if (clockValid && sysData.hasAnySchedule && !sysData.isInsideSchedule) {
-                        executeACCommand(false, 24, "enforce_off");
-                        sysData.acAutoState = AUTO_OFF;
-                        break;
-                    }
-                    // Inside schedule (or no schedule, or no valid time): re-assert current state.
-                    if (sysData.radarAutoMode && sysData.acAutoState == AUTO_ON_ECO)
-                        break;
-                    if (sysData.acAutoState == AUTO_ON_NORMAL)
-                        executeACCommand(true, sysData.currentNormalTemp, "enforce_normal");
-                    else if (sysData.acAutoState == AUTO_ON_ECO)
-                        executeACCommand(true, sysData.currentEcoTemp, "enforce_eco");
-                    else if (sysData.acAutoState == AUTO_OFF)
-                        executeACCommand(false, 24, "enforce_off");
+                    // Periodic (3-min) re-assertion. When clock is invalid (offline
+                    // boot) the helper skips the schedule check so the AC state loaded
+                    // from NVS/radar is not overridden until time is available.
+                    enforceCurrentState(clockValid);
+                    break;
+
+                case EVENT_MANUAL_OVERRIDE:
+                    // A user pressed the physical/phone IR remote. Report it to the
+                    // cloud (code 4000) and immediately re-assert the correct state
+                    // instead of waiting for the next 3-min enforce tick.
+                    NetworkManager::sendAutomationEvent("4000");
+                    enforceCurrentState(clockValid);
                     break;
 
                 case EVENT_MQTT_COMMAND:

@@ -7,14 +7,85 @@
 #include "board_select.h"
 #include "WebDashboard.h"
 #include "AutomationManager.h"
+#include "IRManager.h"
 #include "esp_task_wdt.h"
 
 // --- Private Objects ---
 static Adafruit_HDC1000 hdc = Adafruit_HDC1000();
 static MyLD2410 radar(sensorSerial);
 static SystemData *globalState = nullptr;
+// Set true once poll() sees a real data frame — gates the one-time boot range read.
+static volatile bool radarStreamConfirmed = false;
 // Add this near the top of SensorManager.cpp, after the includes
 extern TaskHandle_t sensorsTaskHandle;
+
+// LD2412 distance-gate width: 0.75 m per gate (datasheet). We use this fixed value
+// instead of querying resolution (the LD2410 0xAB query isn't supported on LD2412).
+#define RADAR_GATE_CM 75
+
+// Read the radar's CURRENT stored max gate (its own flash is the source of truth)
+// and cache the boundary for the dashboard. The params query briefly enters config
+// mode, which drops engineering streaming, so we re-enable it right after.
+static void readAndStoreRange()
+{
+    if (!globalState || !globalState->sensorReady)
+        return;
+    esp_task_wdt_reset();
+    byte gate = radar.getRange(); // raw max-gate register value (via 0x0012 query)
+    radar.enhancedMode();
+    globalState->lastRadarDataTime = millis();
+    // getRange() returns the raw register value we wrote; the radar's EFFECTIVE max
+    // gate — what it physically detects and what the HLK app shows over BLE — is one
+    // gate less. Subtract it so the dashboard matches the real boundary (gate * 0.75 m).
+    int effGate = (gate >= 1) ? (gate - 1) : 0;
+    globalState->radarRangeCm = effGate * RADAR_GATE_CM;
+}
+
+// Snap a requested boundary distance (cm) to the nearest radar gate, apply it, and
+// record the achieved range. MUST run on the sensor task (touches the radar UART
+// via config mode). setMaxGate leaves the radar in plain run mode, so we re-enable
+// enhancedMode() afterward to keep the per-gate live feed alive.
+static void applyRadarRange(int cm)
+{
+    if (!globalState || !globalState->sensorReady || cm <= 0)
+        return;
+
+    // Resync the config state machine first (forces isConfig=false). Without this a
+    // desynced flag can make the chained config commands below short-circuit and
+    // leave the radar stuck in config mode — same guard the calibration path uses.
+    esp_task_wdt_reset();
+    radar.begin();
+
+    const int res = RADAR_GATE_CM; // LD2412 fixed 0.75 m/gate
+    // Target gate the user actually wants to reach (1-14), distance = gate * 0.75 m.
+    // "set to 2 -> within 1.5 m" (2 * 0.75). So round(cm / 0.75 m), clamped 1-14.
+    int gate = (cm + res / 2) / res;
+    if (gate < 1) gate = 1;
+    if (gate > 14) gate = 14;
+
+    // The radar lands one gate SHORT of the value written (confirmed against the HLK
+    // app, which reads the same register over BLE: writing gate N ends up stored as
+    // N-1, e.g. requesting 6 m / gate 8 physically detected only to 5.25 m / gate 7).
+    // Write gate+1 so the radar's stored boundary equals the target gate. setMaxGate
+    // clamps the result to 14, so the very top end saturates at gate 13 (9.75 m).
+    int writeGate = gate + 1;
+    if (writeGate > 14) writeGate = 14;
+
+    byte window = radar.getNoOneWindow();
+    if (window == 0) window = 5; // preserve current "no-one" window, default 5s
+
+    esp_task_wdt_reset();
+    bool ok = radar.setMaxGate((byte)writeGate, (byte)writeGate, window);
+    radar.enhancedMode(); // restore engineering stream killed by config mode
+    globalState->lastRadarDataTime = millis();
+
+    // Read back what the radar ACTUALLY stored (authoritative — this is what the
+    // HLK app also shows). After the +1 compensation this should equal the target gate.
+    readAndStoreRange();
+
+    Serial.printf("[RADAR] setMaxGate %s: req=%dcm target_gate=%d wrote=%d -> radar now reports %dcm\n",
+                  ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
+}
 
 
 namespace SensorManager
@@ -59,6 +130,11 @@ namespace SensorManager
 
         if (began)
         {
+            // Keep boot minimal and proven: just enable engineering streaming. Do NOT
+            // do config-mode reads here — at boot the radar is still settling and a
+            // missed ACK can desync the config flag and leave it stuck in config mode
+            // (no data frames). The saved range is applied later by the sensor task,
+            // once streaming is confirmed.
             radar.enhancedMode();
             globalState->sensorReady = true;
             globalState->lastRadarDataTime = millis();
@@ -115,6 +191,7 @@ namespace SensorManager
         if (radar.check() == MyLD2410::Response::DATA)
         {
             globalState->lastRadarDataTime = millis();
+            radarStreamConfirmed = true; // gate the one-time boot range apply
 
             bool rawPresence = radar.presenceDetected();
             // detectedDistance() = live target distance in cm. getRange() returns the
@@ -185,6 +262,7 @@ namespace SensorManager
             radar.enhancedMode();
             globalState->sensorReady = true;
             globalState->lastRadarDataTime = millis();
+            // No range re-apply needed — the radar keeps its own range in flash.
             Serial.println("[HEALTH] Radar recovered!");
         }
     }
@@ -325,6 +403,23 @@ namespace SensorManager
         return globalState ? globalState->radarCalStatus.load() : 0;
     }
 
+    // --- Detection-range triggers --------------------------------------------
+    bool requestSetRange(int cm)
+    {
+        if (!globalState || !globalState->sensorReady || sensorsTaskHandle == NULL)
+            return false;
+        if (globalState->radarCalStatus.load() == 1)
+            return false; // a calibration/reset is running — don't collide on the UART
+        globalState->radarDesiredCm = cm;
+        xTaskNotify(sensorsTaskHandle, (1 << 3), eSetBits);
+        return true;
+    }
+
+    int getRangeCm()
+    {
+        return globalState ? globalState->radarRangeCm.load() : 0;
+    }
+
     void checkHealth()
     {
         if (!globalState)
@@ -351,7 +446,7 @@ namespace SensorManager
         }
         else if (btn == BTN_LONG_PRESS)
         {
-            Serial.println("Long Button Press Detected: Factory Reset");
+            Serial.println("Long Button Press Detected: Exiting AP Mode");
             WebDashboard::stopAPMode();
         }
     }
@@ -379,10 +474,47 @@ namespace SensorManager
                 {
                     runRadarFactoryReset();
                 }
+                if (notificationValue & (1 << 3)) // web: set detection range
+                {
+                    applyRadarRange(globalState->radarDesiredCm.load());
+                }
             }
             else
             {
                 poll();
+            }
+
+            // --- Always-on remote detection ---
+            // Catch any USER press on the AC/phone IR remote. A genuine foreign
+            // frame is logged for the dashboard and triggers an immediate enforce
+            // so the schedule/automation re-asserts the correct AC state.
+            IRManager::RemotePress press;
+            if (IRManager::pollRemoteListener(press))
+            {
+                uint8_t idx = globalState->remoteLogHead;
+                globalState->remoteLog[idx].atMillis = millis();
+                snprintf(globalState->remoteLog[idx].text,
+                         sizeof(globalState->remoteLog[idx].text),
+                         "%s 0x%lX", press.proto, (unsigned long)press.value);
+                globalState->remoteLogHead = (idx + 1) % REMOTE_LOG_SIZE;
+                globalState->remoteOverrideCount.fetch_add(1, std::memory_order_relaxed);
+
+                Serial.printf("[IR-RX] Manual remote press detected: %s 0x%lX\n",
+                              press.proto, (unsigned long)press.value);
+
+                SystemEvent ev;
+                ev.type = EVENT_MANUAL_OVERRIDE;
+                ev.payload = 0;
+                xQueueSend(automationQueue, &ev, 0);
+            }
+
+            // One-time: read the radar's stored range for the dashboard AFTER
+            // streaming is confirmed healthy (never during the fragile boot window).
+            static bool bootRangeRead = false;
+            if (!bootRangeRead && radarStreamConfirmed)
+            {
+                readAndStoreRange();
+                bootRangeRead = true;
             }
 
             processButton();

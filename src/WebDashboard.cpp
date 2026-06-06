@@ -23,6 +23,12 @@ namespace WebDashboard
   // --- Private Variables ---
   static WebServer server(80);
 
+  // Deferred AP-mode exit: the /exitap route can't tear down the server from
+  // inside its own request handler, so it sets this flag + a short delay and
+  // TaskWeb calls stopAPMode() afterward (same task, response already flushed).
+  static bool pendingExitAP = false;
+  static unsigned long exitAPTime = 0;
+
   const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -101,6 +107,7 @@ async function refresh(idle){
     const wb=document.getElementById('swf');
     if(d.has_credentials){wb.innerText='Saved in Memory';wb.className='badge green';}
     else{wb.innerText='Missing / Empty';wb.className='badge yellow';}
+    exMode=d.mode;exCreds=!!d.has_credentials;
     const kd=document.getElementById('sk');
     kd.innerHTML=d.keys.length>0?d.keys.map(k=>'<span class="badge">'+k+'</span>').join(''):'<span style="color:#64748b;">No Buttons Saved</span>';
   }catch(e){sui('Disconnected','red');}
@@ -143,6 +150,17 @@ async function saveSt(){
     await fetch('/setwifi?mode='+m+'&ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p),{method:'POST'});
     alert('Saved! Device is rebooting.');
   }
+}
+
+var exMode='wifi',exCreds=true;
+async function exitAP(){
+  var msg='Exit setup mode and reconnect to your network? You will lose this page.';
+  if(exMode==='wifi'&&!exCreds)msg='WARNING: No WiFi credentials are saved. The device will go offline and you may need the physical button to get back into setup mode. Continue anyway?';
+  if(!confirm(msg))return;
+  try{
+    const res=await fetch('/exitap',{method:'POST'});
+    alert(await res.text());
+  }catch(e){alert('Request sent — device is reconnecting.');}
 }
 
 var dpt=null;
@@ -190,6 +208,20 @@ async function doCal(ep){
   document.querySelectorAll('button').forEach(b=>b.disabled=false);
   setTimeout(()=>{sui('System Ready','green');lg.innerText='> Ready';lg.style.color='var(--ok)';},4000);
 }
+function setRange(m){document.getElementById('inp-range').value=m;applyRange();}
+async function applyRange(){
+  var m=parseFloat(document.getElementById('inp-range').value);
+  if(isNaN(m)||m<=0)return alert('Enter a valid distance in meters.');
+  var cm=Math.round(m*100);
+  var dr=document.getElementById('drange');
+  try{
+    var res=await fetch('/setrange?cm='+cm,{method:'POST'});
+    var txt=await res.text();
+    if(!res.ok){alert(txt);return;}
+    if(dr){dr.innerText='Applying…';dr.className='badge yellow';}
+    // pollD() refreshes the badge with the actual snapped value within ~1s.
+  }catch(e){alert('Request failed.');}
+}
 function buildGates(cid,arr,isMv){
   var clr=isMv?'linear-gradient(90deg,#2563eb,#60a5fa)':'linear-gradient(90deg,#7c3aed,#a78bfa)';
   var h='';
@@ -211,6 +243,8 @@ async function pollD(){
     var pr=document.getElementById('dpres');
     var distEl=document.getElementById('dradar-dist');
     if(distEl)distEl.innerText=d.radar_distance!=null?(d.radar_distance.toFixed(0)+' cm'):'--';
+    var drEl=document.getElementById('drange');
+    if(drEl){if(d.radar_range_cm>0){drEl.innerText=(d.radar_range_cm/100).toFixed(2)+' m';drEl.className='badge green';}else{drEl.innerText='Default (max)';drEl.className='badge';}}
     if(d.mv&&d.mv.length)buildGates('mv-gates',d.mv,true);
     if(d.sx&&d.sx.length)buildGates('st-gates',d.sx,false);
     pr.innerText=d.presence?'DETECTED':'EMPTY';
@@ -225,6 +259,15 @@ async function pollD(){
     document.getElementById('dvhdc').innerText=d.hdc_ok?'OK':'FAULT';
     document.getElementById('dva').innerText=d.radar_auto?'Enabled':'Disabled';
     document.getElementById('dvnvs').innerText = d.nvs_used_entries + ' / ' + d.nvs_total_entries;
+    var rc=document.getElementById('rcount');if(rc)rc.innerText=d.remote_count;
+    if(d.remote_log){
+      var rh='';
+      if(d.remote_log.length===0)rh='<span style="color:#475569;font-size:0.75rem;">No manual presses detected.</span>';
+      else for(var j=0;j<d.remote_log.length;j++){
+        rh+='<div class="dr"><span class="dv">'+d.remote_log[j].t+'</span><span class="dk">'+d.remote_log[j].ago+'s ago</span></div>';
+      }
+      var rl=document.getElementById('rlog');if(rl)rl.innerHTML=rh;
+    }
   }catch(e){}
 }
 async function saveDP(){
@@ -288,6 +331,7 @@ window.onload=function(){refresh();};
 
     <!-- System Tools Group -->
     <div style="font-size:0.72rem; color:#64748b; margin-bottom:8px; text-transform:uppercase; letter-spacing:.5px;">System Tools</div>
+    <button class="btn-t" id="exap" onclick="exitAP()">Exit Setup Mode &amp; Reconnect</button>
     <button class="btn-v" onclick="window.location.href='/update'">OTA Firmware Update</button>
     <button style="background:#1e293b; color:#cbd5e1; border:1px solid #334155;" onclick="openDM()">&#128295; Developer Mode</button>
   </div>
@@ -349,6 +393,24 @@ window.onload=function(){refresh();};
       </div>
     </div>
     <div class="card">
+      <h3>Radar Detection Range</h3>
+      <div style="margin-bottom:14px;">
+        <div class="sl">Current boundary</div>
+        <div id="drange" class="badge green" style="font-size:0.95rem;">&#8212;</div>
+      </div>
+      <div class="sl" style="margin-bottom:5px;">Set detection distance</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <input type="number" class="pi" id="inp-range" min="0.3" max="11" step="0.1" placeholder="e.g. 4.5" style="width:100%;">
+        <span class="pu">m</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setRange(2)">2 m</button>
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setRange(4)">4 m</button>
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setRange(6)">6 m</button>
+      </div>
+      <button class="btn-p" onclick="applyRange()">Apply Range</button>
+    </div>
+    <div class="card">
       <h3>Automation Parameters</h3>
       <div class="pr">
         <div><div class="pn">Normal Temp</div><div class="ps">AC ON set point</div></div>
@@ -380,6 +442,14 @@ window.onload=function(){refresh();};
       <div class="dr"><span class="dk">HDC1080 Sensor</span><span class="dv" id="dvhdc">&#8212;</span></div>
       <div class="dr"><span class="dk">Radar Auto Mode</span><span class="dv" id="dva">&#8212;</span></div>
       <div class="dr"><span class="dk">NVS Flash Used</span><span class="dv" id="dvnvs">&#8212;</span></div>
+    </div>
+    <div class="card">
+      <h3>Remote Activity</h3>
+      <div class="dr"><span class="dk">Manual presses (total)</span><span class="dv" id="rcount">0</span></div>
+      <div style="margin-top:12px;">
+        <div class="sl" style="margin-bottom:6px;">Recent detections</div>
+        <div id="rlog"><span style="color:#475569;font-size:0.75rem;">No manual presses detected.</span></div>
+      </div>
     </div>
     <div class="card" style="grid-column: 1 / -1;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -448,6 +518,18 @@ window.onload=function(){refresh();};
             } else {
                 server.send(400, "text/plain", "Error: Incomplete request!");
             } });
+
+    // Exit AP/setup mode without rebooting — equivalent to the 5s physical long
+    // press. Deferred via flag so we don't stop the server inside its own handler.
+    server.on("/exitap", HTTP_POST, []()
+              {
+            if (!server.authenticate(WWW_USERNAME, WWW_PASSWORD)) return server.requestAuthentication();
+            // The UI warns when no WiFi credentials are saved, but we always honor the
+            // exit — same as the physical long press. (Physical button is the fallback.)
+            server.send(200, "text/plain", "Exiting setup mode, reconnecting...");
+            pendingExitAP = true;
+            exitAPTime = millis() + 1500; // let the response flush before tearing down the AP
+            });
 
     server.onNotFound([]()
                       { server.send(404, "text/plain", "Not Found"); });
@@ -560,6 +642,20 @@ window.onload=function(){refresh();};
             serializeJson(doc, json);
             server.send(200, "application/json; charset=utf-8", json); });
 
+    // Set the radar detection-range boundary. UI sends cm; the sensor task snaps it
+    // to the nearest gate and writes it to the RADAR's own flash (it persists there
+    // across power cycles — the ESP32 does not store it).
+    server.on("/setrange", HTTP_POST, []()
+              {
+            if (!server.hasArg("cm")) { server.send(400, "text/plain", "Missing distance."); return; }
+            int cm = server.arg("cm").toInt();
+            if (cm < 30)   cm = 30;    // ~gate 0
+            if (cm > 1100) cm = 1100;  // ~gate 13 at 75cm/gate
+            if (SensorManager::requestSetRange(cm))
+                server.send(200, "text/plain", "Range update sent.");
+            else
+                server.send(409, "text/plain", "Radar not ready or busy. Try again."); });
+
     server.on("/devdata", HTTP_GET, []()
               {
             JsonDocument doc;
@@ -571,6 +667,7 @@ window.onload=function(){refresh();};
         doc["nvs_total_entries"] = nvs_stats.total_entries;
         // ----------------------------
             doc["radar_distance"] = sysData.radarDistance;
+            doc["radar_range_cm"] = SensorManager::getRangeCm();
             doc["presence"]     = (bool)sysData.cachedPresence;
             doc["radar_ready"]  = sysData.sensorReady;
 
@@ -587,6 +684,19 @@ window.onload=function(){refresh();};
             doc["eco_time_min"] = (int)(sysData.TEcoTime / 60000);
             doc["off_time_min"] = (int)(sysData.TOffTime / 60000);
             doc["flap_delay_sec"] = sysData.flapDelaySec; // <--- ADD THIS
+
+            // --- Manual remote-press log (most recent first) ---
+            doc["remote_count"] = (int)sysData.remoteOverrideCount.load();
+            JsonArray rlog = doc["remote_log"].to<JsonArray>();
+            uint32_t nowMs = millis();
+            for (uint8_t k = 0; k < REMOTE_LOG_SIZE; k++) {
+                uint8_t idx = (sysData.remoteLogHead + REMOTE_LOG_SIZE - 1 - k) % REMOTE_LOG_SIZE;
+                if (sysData.remoteLog[idx].atMillis == 0) continue;
+                JsonObject e = rlog.add<JsonObject>();
+                e["t"]   = sysData.remoteLog[idx].text;
+                e["ago"] = (int)((nowMs - sysData.remoteLog[idx].atMillis) / 1000);
+            }
+
             doc["free_heap"]    = (int)ESP.getFreeHeap();
             doc["uptime_s"]     = (int)(millis() / 1000);
             doc["hdc_ok"]       = !sysData.hdcInitFailed;
@@ -732,6 +842,12 @@ window.onload=function(){refresh();};
       if (sysData.isAPMode)
       {
         handleClient();
+        // Deferred exit: response is flushed by now; tear down on this same task.
+        if (pendingExitAP && millis() > exitAPTime)
+        {
+          pendingExitAP = false;
+          stopAPMode();
+        }
       }
       vTaskDelay(pdMS_TO_TICKS(50));
     }

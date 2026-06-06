@@ -12,8 +12,12 @@ enum EventType {
     EVENT_SCHEDULE_TRIGGER,
     EVENT_ECO_TRIGGER, // <--- ADD THIS
     EVENT_OFF_TRIGGER,  // <--- ADD THIS
-    EVENT_ENFORCE_TRIGGER // <--- ADD THIS
+    EVENT_ENFORCE_TRIGGER, // <--- ADD THIS
+    EVENT_MANUAL_OVERRIDE  // user pressed the AC remote (detected on the IR receiver)
 };
+
+// How many recent manual remote presses to keep for the dashboard "Remote Activity" card.
+#define REMOTE_LOG_SIZE 5
 
 // 2. Define the message payload
 struct SystemEvent {
@@ -93,6 +97,24 @@ struct SystemData {
     // --- Web-triggered radar maintenance (executed on the sensor task) ---
     // 0 = idle, 1 = in progress, 2 = success, 3 = failed
     std::atomic<int> radarCalStatus{0};
+
+    // --- Radar detection-range control (executed on the sensor task) ---
+    // Web writes radarDesiredCm + notifies the sensor task (bit 3); the sensor task
+    // snaps it to the nearest gate, applies setMaxGate(), and writes the achieved
+    // boundary back to radarRangeCm for the dashboard to display.
+    std::atomic<int> radarDesiredCm{0}; // requested boundary in cm (web → sensor task)
+    std::atomic<int> radarRangeCm{0};   // last range read back from the radar (display)
+
+    // --- Manual remote-press detection log (IR receiver is always listening) ---
+    // Written by the sensor task when a foreign IR frame is detected, read by the
+    // web task for the "Remote Activity" dashboard card. Torn reads are harmless
+    // here (diagnostic only). atMillis == 0 marks an empty slot.
+    struct RemotePressEntry {
+        uint32_t atMillis = 0;
+        char text[24] = {0}; // e.g. "COOLIX 0xB2BF40"
+    } remoteLog[REMOTE_LOG_SIZE];
+    uint8_t remoteLogHead = 0;             // next slot to write
+    std::atomic<uint32_t> remoteOverrideCount{0}; // total presses since boot
 
     // --- Automation Settings ---
     int currentNormalTemp = 24;

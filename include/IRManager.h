@@ -6,9 +6,20 @@
 // compilation fast and prevent naming collisions in other files.
 
 namespace IRManager {
-    
+
+    // Result of a detected (foreign) remote press, filled by pollRemoteListener().
+    struct RemotePress {
+        char proto[16];  // protocol name, e.g. "COOLIX" / "UNKNOWN"
+        uint32_t value;  // low 32 bits of the decoded value (display/debounce only)
+    };
+
     // Setup the hardware (called once in setup)
     void init();
+
+    // Non-blocking: poll the always-on IR receiver for a genuine USER remote press.
+    // Returns true (and fills `out`) only when a real foreign frame is detected —
+    // our own transmissions, repeat frames, noise and learn-mode are filtered out.
+    bool pollRemoteListener(RemotePress &out);
 
     // Sends the AC command (tries custom first, falls back to Universal)
     // Returns true if a custom button was used, false if universal was used.

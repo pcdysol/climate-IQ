@@ -23,5 +23,11 @@ namespace SensorManager {
     bool requestRadarFactoryReset();  // reset radar to factory defaults
     int  getCalStatus();              // 0 idle, 1 in progress, 2 success, 3 failed
 
+    // Detection-range boundary. requestSetRange() validates+notifies the sensor task
+    // (range config touches the radar UART, so it must run there). The radar stores
+    // the range in its own flash; getRangeCm() returns the last value read back.
+    bool requestSetRange(int cm);
+    int  getRangeCm();
+
     void TaskSensors(void *pvParameters);
 }

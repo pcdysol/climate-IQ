@@ -76,3 +76,39 @@
 // ====================================================================
 #define data_delay_interval 10000
 #define TELEMETRY_INTERVAL  10000
+
+// ====================================================================
+// ===================== 6. OTA (SERVER-BASED) ========================
+// ====================================================================
+
+// Running firmware version. BUMP THIS every release you build & upload
+// to the server. The device refuses to install a build whose version
+// string equals the one it is already running (unless "force":true).
+#define FW_VERSION              "1.0.1"
+
+// Max time (ms) the whole download+flash is allowed to take before abort.
+#define OTA_HTTP_TIMEOUT_MS     60000
+
+// --- Trial-boot rollback ---
+// After a successful flash the new image boots "on trial". It is committed
+// permanently only once health is confirmed (MQTT reconnects). If the new image
+// instead crashes and reboots this many times without confirming, the device
+// automatically reverts to the previous firmware (the other OTA partition).
+#define OTA_MAX_TRIAL_BOOTS     3
+
+// Optional time-based rollback (ms). If a trial image stays up but never confirms
+// health within this window, revert anyway. 0 = disabled (recommended): rely on
+// the boot-loop counter so a transient broker outage cannot revert a healthy
+// device. Set e.g. 300000 (5 min) if you also want "boots-but-never-phones-home"
+// builds to auto-revert.
+#define OTA_TRIAL_CONFIRM_MS    0
+
+// TLS server-certificate validation. Only used for https:// URLs; the
+// deployment server (http://107.172.137.233/firmware/firmware.bin) is plain
+// HTTP, so this stays empty.
+//  - Leave OTA_ROOT_CA empty ("") to skip cert validation (client.setInsecure()).
+//    Integrity is still guaranteed by the ESP32 image SHA256 the ROM bootloader
+//    verifies, but it is NOT protected against an active MITM that serves a
+//    *validly-signed* malicious binary.
+//  - For production over HTTPS, paste your server's root CA PEM here to pin it.
+#define OTA_ROOT_CA             ""

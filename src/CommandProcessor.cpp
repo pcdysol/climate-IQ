@@ -4,6 +4,7 @@
 #include "IRManager.h"
 #include "Indicator.h"
 #include "NetworkManager.h"
+#include "OTAManager.h"
 #include <Preferences.h>
 
 extern Preferences preferences;
@@ -152,6 +153,20 @@ namespace CommandProcessor {
                 snprintf(detail, sizeof(detail), "toff=%lu_min", doc["toff"].as<unsigned long>());
                 NetworkManager::publishACK("toff", detail);
             }
+            isValidCommand = true;
+        }
+        // =========================================================
+        // 4b. SERVER-BASED OTA FIRMWARE UPDATE
+        // =========================================================
+        else if (cmd == "ota_update") {
+            const char *url     = doc["url"]     | "";
+            const char *version = doc["version"] | "";
+            bool force          = doc["force"]   | false;
+
+            bool accepted = OTAManager::requestUpdate(url, version, force);
+            // Runs asynchronously in TaskOTA — do NOT block the MQTT callback.
+            NetworkManager::publishACK("ota_update",
+                                       accepted ? "queued" : "rejected");
             isValidCommand = true;
         }
         // =========================================================

@@ -10,6 +10,7 @@
 #include "esp_task_wdt.h"
 #include "indicator.h"
 #include "GSMManager.h"
+#include "OTAManager.h"
 #include "esp_sntp.h"
 #include <atomic>
 
@@ -147,6 +148,7 @@ namespace WiFiManager
             bd["reset_reason"] = HealthManager::getResetReason();
             bd["hdc_init"] = sysData.hdcInitFailed ? "FAILED" : "OK";
             bd["radar_init"] = sysData.radarInitFailed ? "FAILED" : "OK";
+            bd["fw_version"] = OTAManager::currentVersion();
             char bootBuf[256];
             size_t len = serializeJson(bootDoc, bootBuf);
 
@@ -155,6 +157,10 @@ namespace WiFiManager
             bootAlertSent = true;
             Serial.println("[BOOT] Boot alert sent via MQTT.");
         }
+
+        // If we just rebooted from a successful OTA, confirm it to the
+        // backend exactly once now that the link is back up.
+        OTAManager::reportBootResultIfPending();
     }
 
     void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
@@ -319,6 +325,7 @@ namespace WiFiManager
                 bootReasonReported = true;
             }
             mac["device_type"] = "climate_sensor";
+            mac["fw_version"] = OTAManager::currentVersion();
             mac["battery_level"] = batteryPercentage();
             mac["wifi_signal_strength"] = rssi;
             mac["uptime_s"] = millis() / 1000;

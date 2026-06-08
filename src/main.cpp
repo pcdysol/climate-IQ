@@ -10,6 +10,7 @@
 #include "HealthManager.h"
 #include "CommandProcessor.h"
 #include "NetworkManager.h"
+#include "OTAManager.h"
 #include <Preferences.h>
 #include "esp_task_wdt.h"
 
@@ -34,7 +35,12 @@ SemaphoreHandle_t irMutex;
 
 void setup() {
     Serial.begin(115200);
-    
+
+    // OTA trial/rollback bookkeeping. MUST run first — before any subsystem init —
+    // so the trial boot counter advances (and a crash-looping new image can be
+    // reverted) even if the firmware later crashes during hardware init.
+    OTAManager::init();
+
     // 1. Hardware Initialization
     Indicator::init();
     // Add this inside setup(), BEFORE IRManager::init():
@@ -59,6 +65,7 @@ void setup() {
     // own flash. The sensor task reads it back for display once streaming is up.
     
     ScheduleManager::refreshHasAnySchedule();
+
     // 2. Create the Queue (Holds up to 10 events)
     automationQueue = xQueueCreate(10, sizeof(SystemEvent));
     
@@ -82,7 +89,12 @@ void setup() {
     // NOTE: capture the handle (&sensorsTaskHandle) — health recovery and the web
     // calibrate/reset triggers all xTaskNotify() this task; with NULL it stays unset.
     xTaskCreatePinnedToCore(SensorManager::TaskSensors, "SensorsTask", 4096, NULL, 3, &sensorsTaskHandle, 1);
-    xTaskCreatePinnedToCore(WebDashboard::TaskWeb,     "WebTask",     4096, NULL, 1, NULL, 0); 
+    xTaskCreatePinnedToCore(WebDashboard::TaskWeb,     "WebTask",     4096, NULL, 1, NULL, 0);
+
+    // OTA worker: idle until an MQTT ota_update command queues a job. 10 KB stack
+    // covers the TLS handshake + HTTPUpdate call chain. Low priority so it never
+    // starves sensors/automation; it only does real work when a command arrives.
+    xTaskCreatePinnedToCore(OTAManager::TaskOTA,       "OTATask",     10240, NULL, 2, NULL, 1);
 
     // 3. Network Boot
     if (!sysData.isAPMode && sysData.switch_gsm_wifi) {

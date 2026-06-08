@@ -1,3 +1,7 @@
+/**
+ * @file HealthManager.cpp
+ * @brief Implementation of periodic health checks and reset-reason reporting.
+ */
 #include "HealthManager.h"
 #include "SensorManager.h"
 #include "NetworkManager.h"
@@ -6,8 +10,9 @@
 
 namespace HealthManager {
 
+    /// @return Human-readable cause of the last CPU reset (core 0 reset reason).
     String getResetReason() {
-        RESET_REASON reason = rtc_get_reset_reason(0); 
+        RESET_REASON reason = rtc_get_reset_reason(0);
         switch (reason) {
             case 1: return "Power On";
             case 3: return "Software Reset";
@@ -18,11 +23,14 @@ namespace HealthManager {
         }
     }
 
-    // Change this signature:
+    /**
+     * @brief 30s periodic health check (FreeRTOS timer callback).
+     *
+     * Runs the radar staleness check and publishes a low_heap alert if free heap
+     * drops below the threshold. The timer guarantees the 30s cadence, so no
+     * millis() bookkeeping is needed here.
+     */
     void HealthTimerCallback(TimerHandle_t xTimer) {
-        // You NO LONGER NEED lastHealthCheck or millis() logic!
-        // FreeRTOS guarantees this function only executes exactly every 30 seconds.
-        
         SensorManager::checkHealth();
 
         uint32_t freeHeap = ESP.getFreeHeap();

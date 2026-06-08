@@ -1,9 +1,19 @@
+/**
+ * @file WiFiManager.cpp
+ * @brief Implementation of the WiFi station + AsyncMqttClient transport.
+ *
+ * Drives the WiFi connection (with a non-fatal boot timeout so the device runs
+ * offline), NTP time sync, and the asynchronous MQTT lifecycle: LWT/online
+ * messages, topic subscription, the one-shot boot alert, and exponential
+ * backoff reconnection. loop() also publishes the periodic telemetry payload.
+ * The global `mqttClient` defined here is shared with OTAManager. See
+ * WiFiManager.h for the public API.
+ */
 #include "WiFiManager.h"
 #include "config.h"
 #include "CommandProcessor.h"
 #include "HealthManager.h"
 #include <WiFi.h>
-// #include <PubSubClient.h>
 #include <AsyncMqttClient.h>
 #include <Preferences.h>
 #include "SharedState.h"
@@ -13,31 +23,21 @@
 #include "OTAManager.h"
 #include "esp_sntp.h"
 #include <atomic>
+#include "esp_log.h"
+
+static const char *TAG = "WIFI";
 
 extern Preferences preferences;
 extern SystemData sysData;
-// WiFiClient espClient;
-// PubSubClient client(espClient);
-AsyncMqttClient mqttClient;
-unsigned long lastWifiRetry = 0;
-unsigned long wifiBackoffMs = 5000;
-unsigned long lastMqttRetry = 0;
-unsigned long mqttBackoffMs = 5000;
-// std::atomic<bool> timeValid{false};
-unsigned long lastTelemetry = 0;
-
-// The thread-safe callback
-// void timeSyncCallback(struct timeval *tv)
-// {
-//     Serial.println("\n[NTP] Time synchronization event! Real time acquired.");
-//     timeValid.store(true, std::memory_order_relaxed);
-// }
+AsyncMqttClient mqttClient;            ///< Shared async MQTT client (also used by OTAManager).
+unsigned long lastWifiRetry = 0;       ///< millis() of the last WiFi reconnect attempt.
+unsigned long wifiBackoffMs = 5000;    ///< Current WiFi reconnect backoff (doubles to a cap).
+unsigned long lastMqttRetry = 0;       ///< millis() of the last MQTT reconnect attempt.
+unsigned long mqttBackoffMs = 5000;    ///< Current MQTT reconnect backoff (doubles to a cap).
+unsigned long lastTelemetry = 0;       ///< millis() of the last telemetry publish.
 
 namespace WiFiManager
 {
-    // WiFiClient espClient;
-    // PubSubClient client(espClient);
-
     String currentSSID;
     String currentPassword;
     String macAddress;
@@ -50,6 +50,7 @@ namespace WiFiManager
     String globalOnlineTopic;
     String globalOnlineMessage;
 
+    /// @return ISO-8601 local timestamp, or "Syncing..." until NTP time is valid.
     String getTimestamp()
     {
         struct tm timeinfo;
@@ -70,31 +71,39 @@ namespace WiFiManager
         return String(buffer);
     }
 
+    /**
+     * @brief MQTT message callback: null-terminate, parse JSON, dispatch.
+     * @note AsyncMqttClient payloads are NOT null-terminated, so the bytes are
+     *       copied into a local buffer before deserialization.
+     */
     void onMqttMessage(char *topic, char *payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total)
     {
-        Serial.println("\n[WiFi] Message Received:");
-
         // AsyncMqttClient payload is NOT null-terminated. We must copy it.
         char msgBuffer[len + 1];
         memcpy(msgBuffer, payload, len);
         msgBuffer[len] = '\0';
-        Serial.println(msgBuffer);
+        ESP_LOGI(TAG, "Message received: %s", msgBuffer);
 
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, msgBuffer);
         if (error)
         {
-            Serial.println("JSON Parse Failed");
+            ESP_LOGW(TAG, "JSON parse failed");
             return;
         }
 
         CommandProcessor::processJSON(doc);
     }
 
+    /**
+     * @brief Connect to the stored SSID, blocking up to a boot timeout.
+     * @note On timeout it returns and the device continues offline; loop() then
+     *       retries in the background. Keeps the LED/sensors responsive while waiting.
+     */
     void setup_wifi()
     {
         sysData.currentState = SYS_WIFI_CONN;
-        Serial.print("Connecting to WiFi");
+        ESP_LOGI(TAG, "Connecting to WiFi...");
         WiFi.mode(WIFI_STA);
         WiFi.setAutoReconnect(true);
         WiFi.persistent(true);
@@ -113,21 +122,26 @@ namespace WiFiManager
                 return;
             if (millis() - start > WIFI_BOOT_TIMEOUT)
             {
-                Serial.println("\n[WIFI] Boot timeout — continuing offline. Will retry in background.");
+                ESP_LOGW(TAG, "Boot timeout — continuing offline. Will retry in background.");
                 return;
             }
             vTaskDelay(pdMS_TO_TICKS(100));
-            Serial.print(".");
         }
-        Serial.println("\nWiFi Connected!");
+        ESP_LOGI(TAG, "WiFi connected");
         sysData.currentState = SYS_WIFI_OK;
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
+        ESP_LOGI(TAG, "IP: %s", WiFi.localIP().toString().c_str());
     }
 
+    /**
+     * @brief MQTT connected callback: subscribe, publish online + boot alert, confirm OTA.
+     *
+     * Resets the MQTT backoff, subscribes to the command topic, publishes the
+     * retained "Online" status, sends a one-time boot report, and lets
+     * OTAManager confirm/commit a pending firmware update now that the link is up.
+     */
     void onMqttConnect(bool sessionPresent)
     {
-        Serial.println("\n[MQTT] Connected to Broker!");
+        ESP_LOGI(TAG, "Connected to MQTT broker");
 
         // Reset the backoff timer because we successfully connected!
         mqttBackoffMs = 5000;
@@ -155,7 +169,7 @@ namespace WiFiManager
             // Note the new publish signature! (topic, qos, retain, payload)
             mqttClient.publish(mqttTopic.c_str(), 0, false, bootBuf, len);
             bootAlertSent = true;
-            Serial.println("[BOOT] Boot alert sent via MQTT.");
+            ESP_LOGI(TAG, "Boot alert sent via MQTT.");
         }
 
         // If we just rebooted from a successful OTA, confirm it to the
@@ -163,11 +177,13 @@ namespace WiFiManager
         OTAManager::reportBootResultIfPending();
     }
 
+    /// MQTT disconnected callback (logs only; loop() drives the reconnect backoff).
     void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
     {
-        Serial.println("\n[MQTT] Disconnected from Broker.");
+        ESP_LOGW(TAG, "Disconnected from MQTT broker");
     }
 
+    /// Kick off one asynchronous MQTT connect, if WiFi is up and not already connected.
     void reconnect()
     {
         if (sysData.isAPMode)
@@ -177,10 +193,11 @@ namespace WiFiManager
         if (mqttClient.connected())
             return;
 
-        Serial.println("Connecting to MQTT...");
+        ESP_LOGI(TAG, "Connecting to MQTT...");
         mqttClient.connect(); // This is asynchronous. It takes no arguments!
     }
 
+    /// @return The WiFi-STA MAC as a 12-char uppercase hex string (used as device id).
     String getChipMAC()
     {
         uint8_t mac[6];
@@ -190,6 +207,13 @@ namespace WiFiManager
         return String(buf);
     }
 
+    /**
+     * @brief Initialise the transport: connect WiFi, configure NTP, set up MQTT.
+     *
+     * Derives the device id/topics from the MAC, connects WiFi, requests NTP
+     * sync (with a 30-min resync interval), and configures the MQTT client
+     * (server, client id, LWT, online message, callbacks). Called once at boot.
+     */
     void init()
     {
         currentSSID = preferences.getString("wifi_ssid", "");
@@ -199,7 +223,7 @@ namespace WiFiManager
         macAddress.replace(":", "");
         device_id = macAddress;
         mqttTopic = "/topic/" + macAddress;
-        Serial.println("Device ID: " + device_id);
+        ESP_LOGI(TAG, "Device ID: %s", device_id.c_str());
 
         setup_wifi();
 
@@ -212,11 +236,11 @@ namespace WiFiManager
 
             // 2. Fire and forget - LwIP handles internal retries
             configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-            Serial.println("[NTP] Time sync requested via LwIP...");
+            ESP_LOGI(TAG, "Time sync requested via LwIP...");
         }
         else
         {
-            Serial.println("[BOOT] WiFi offline.");
+            ESP_LOGW(TAG, "WiFi offline.");
         }
 
         mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
@@ -236,8 +260,17 @@ namespace WiFiManager
         mqttClient.onMessage(onMqttMessage);
     }
 
+    /// @return Battery percentage placeholder (fixed; no battery gauge fitted).
     int batteryPercentage() { return 80; }
 
+    /**
+     * @brief Service tick: WiFi/MQTT backoff reconnection + periodic telemetry.
+     *
+     * Run from TaskNetwork. Reconnects WiFi then MQTT on exponential backoff
+     * (reset on success), re-asserts NTP after a WiFi reconnect, and once every
+     * TELEMETRY_INTERVAL publishes the full telemetry payload (sensor readings,
+     * presence/empty seconds, heap, RSSI, fw version, etc.).
+     */
     void loop()
     {
         static bool bootReasonReported = false;
@@ -247,12 +280,12 @@ namespace WiFiManager
             if (sysData.currentState != SYS_WIFI_CONN)
             {
                 sysData.currentState = SYS_WIFI_CONN;
-                Serial.println("\n[WIFI] Connection lost — running offline. Background retry active.");
+                ESP_LOGW(TAG, "Connection lost — running offline. Background retry active.");
             }
             if (millis() - lastWifiRetry >= wifiBackoffMs)
             {
                 lastWifiRetry = millis();
-                Serial.printf("[WIFI] Retry attempt (next in ~%lus if this fails)\n", wifiBackoffMs / 1000);
+                ESP_LOGI(TAG, "Retry attempt (next in ~%lus if this fails)", wifiBackoffMs / 1000);
                 WiFi.disconnect();
                 WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
                 wifiBackoffMs = min(wifiBackoffMs * 2, MAX_BACKOFF_MS);
@@ -262,7 +295,7 @@ namespace WiFiManager
 
         if (sysData.currentState == SYS_WIFI_CONN)
         {
-            Serial.println("\n[WIFI] Reconnected!");
+            ESP_LOGI(TAG, "Reconnected!");
             sysData.currentState = SYS_WIFI_OK;
             wifiBackoffMs = 5000;
             // Re-assert SNTP servers upon reconnect to ensure LwIP resumes
@@ -302,8 +335,6 @@ namespace WiFiManager
 
             JsonDocument doc;
             JsonObject mac = doc[device_id].to<JsonObject>();
-            // Thread-safe read
-            // bool isTimeValid = timeValid.load(std::memory_order_relaxed);
             mac["timestamp"] = getTimestamp();
             mac["radar_auto_mode"] = sysData.radarAutoMode ? "Enabled" : "Disabled";
             if (sysData.radarAutoMode)
@@ -336,22 +367,23 @@ namespace WiFiManager
             size_t written = serializeJson(doc, buffer, sizeof(buffer));
             if (written >= sizeof(buffer))
             {
-                Serial.println("[MQTT] ERROR: JSON payload truncated!");
+                ESP_LOGE(TAG, "JSON payload truncated!");
             }
             else if (mqttClient.publish(mqttTopic.c_str(), 0, false, buffer, written))
             {
-                Serial.println("\n[MQTT] Telemetry Sent:");
+                // Telemetry fires every 10s — keep the full payload at DEBUG so
+                // normal operation stays quiet but it's there when you need it.
+                ESP_LOGD(TAG, "Telemetry sent: %s", buffer);
             }
             else
             {
-                Serial.println("\n[MQTT] FAILED to send Telemetry! Forcing reconnect...");
+                ESP_LOGW(TAG, "Failed to send telemetry! Forcing reconnect...");
                 mqttClient.disconnect();
             }
-            serializeJsonPretty(doc, Serial);
-            Serial.println();
         }
     }
 
+    /// Publish a command acknowledgement {ack:"ok", action, detail} to the device topic.
     void publishACK(const char *action, const char *detail)
     {
         JsonDocument doc;
@@ -369,9 +401,10 @@ namespace WiFiManager
         {
             mqttClient.publish(mqttTopic.c_str(), 0, false, buf, len);
         }
-        Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
+        ESP_LOGI(TAG, "ACK action=%s detail=%s", action, detail);
     }
 
+    /// Publish a health/diagnostic alert {event, detail} to the device topic.
     void publishHealthAlert(const char *event, const char *detail)
     {
         JsonDocument doc;
@@ -388,12 +421,13 @@ namespace WiFiManager
         {
             mqttClient.publish(mqttTopic.c_str(), 0, false, buf, len);
         }
-        Serial.printf("[HEALTH ALERT] %s — %s\n", event, detail);
+        ESP_LOGW(TAG, "HEALTH ALERT %s — %s", event, detail);
     }
 
+    /// Publish an immediate automation event {timestamp, auto_event:eventCode}.
     void sendAutomationEvent(String eventCode)
     {
-        Serial.println("\n[EVENT] Sending immediate automation event: " + eventCode);
+        ESP_LOGI(TAG, "Sending immediate automation event: %s", eventCode.c_str());
         JsonDocument doc;
         String currentId = device_id;
         JsonObject data = doc[currentId].to<JsonObject>();
@@ -408,10 +442,10 @@ namespace WiFiManager
         if (mqttClient.connected())
         {
             if (mqttClient.publish(mqttTopic.c_str(), 0, false, buffer, len))
-                Serial.println("  -> Event sent via WiFi MQTT");
+                ESP_LOGI(TAG, "  -> Event sent via WiFi MQTT");
             else
             {
-                Serial.println("  -> Event publish FAILED! Forcing reconnect...");
+                ESP_LOGW(TAG, "  -> Event publish FAILED! Forcing reconnect...");
                 mqttClient.disconnect();
             }
         }

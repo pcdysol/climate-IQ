@@ -3,31 +3,52 @@
 #include "board_select.h"
 #include "MyLD2410.h"
 
+/**
+ * @file SensorManager.h
+ * @brief LD2412 radar + HDC1080 climate sensor management.
+ *
+ * Owns both sensors and, critically, the radar UART — so ALL radar config
+ * (calibration, factory reset, range changes) must happen on the sensor task.
+ * Other tasks request those operations through the request*() functions below,
+ * which validate and signal the sensor task via xTaskNotify(); the sensor task
+ * is the only code that touches the radar link. Progress/results come back
+ * through SystemData (radarCalStatus, radarRangeCm).
+ */
 namespace SensorManager {
-    // Boot up sensors and map them to the central state
+    /// Initialise HDC1080 + radar and bind the shared state. Called once in setup().
     void init(SystemData* state);
-    
-    // Process new data from Radar and HDC
+
+    /// Read new radar/HDC frames and update shared state (called from the sensor task).
     void poll();
-    // Add this under poll()
+
+    /// Health check: flag the radar for recovery if its data has gone stale.
     void checkHealth();
 
-    // Recovery functions
+    /// Re-init the HDC1080 over I2C after repeated failed reads.
     void attemptHDCRecovery();
+    /// Re-establish the radar UART link and re-enable streaming.
     void attemptRadarRecovery();
 
-    // Web-triggered radar maintenance. These only signal the sensor task (the only
-    // owner of the radar UART) and return immediately. Progress/result is reported
-    // through SystemData::radarCalStatus (poll getCalStatus()).
-    bool requestCalibration();        // auto-threshold calibration (room must be empty)
-    bool requestRadarFactoryReset();  // reset radar to factory defaults
-    int  getCalStatus();              // 0 idle, 1 in progress, 2 success, 3 failed
+    // --- Web-triggered radar maintenance ---
+    // These only signal the sensor task (the sole owner of the radar UART) and
+    // return immediately. Progress/result is reported via SystemData::radarCalStatus
+    // (poll getCalStatus()).
 
-    // Detection-range boundary. requestSetRange() validates+notifies the sensor task
-    // (range config touches the radar UART, so it must run there). The radar stores
-    // the range in its own flash; getRangeCm() returns the last value read back.
+    /// Request auto-threshold calibration (room must be empty). @return true if queued.
+    bool requestCalibration();
+    /// Request a radar factory-defaults reset. @return true if queued.
+    bool requestRadarFactoryReset();
+    /// @return Maintenance status: 0 idle, 1 in progress, 2 success, 3 failed.
+    int  getCalStatus();
+
+    // --- Detection-range boundary ---
+    // The radar stores the range in its own flash; the ESP32 does not persist it.
+
+    /// Request a new detection boundary in cm (validated, snapped on the sensor task). @return true if queued.
     bool requestSetRange(int cm);
+    /// @return Last detection-range boundary (cm) read back from the radar.
     int  getRangeCm();
 
+    /// FreeRTOS task: poll loop + notification-driven radar maintenance + IR-RX listener.
     void TaskSensors(void *pvParameters);
 }

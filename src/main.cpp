@@ -1,3 +1,18 @@
+/**
+ * @file main.cpp
+ * @brief Firmware entry point: global definitions, setup() and loop().
+ *
+ * setup() initialises hardware and subsystems in a deliberate order (OTA
+ * bookkeeping first so a crash-looping image can still be rolled back), loads
+ * persisted settings from NVS, creates the shared queue/timers/mutex, and
+ * spawns the FreeRTOS tasks that do the real work:
+ *   ScheduleTask, AutomationTask, SensorsTask, WebTask, OTATask, NetworkTask.
+ * loop() then runs at low priority: it pets the watchdog, drives the status
+ * LED, and performs any deferred reboot.
+ *
+ * This translation unit also DEFINES the global handles/state declared extern
+ * in SharedState.h (sysData, automationQueue, the timers, irMutex, etc.).
+ */
 #include <Arduino.h>
 #include "config.h"
 #include "SharedState.h"
@@ -13,26 +28,31 @@
 #include "OTAManager.h"
 #include <Preferences.h>
 #include "esp_task_wdt.h"
+#include "esp_log.h"
 
-SystemData sysData;
-Preferences preferences;
+static const char *TAG = "MAIN";
 
-bool pendingReboot = false;
-unsigned long rebootTime = 0;
-// 1. Define the globals
-QueueHandle_t automationQueue;
-TimerHandle_t healthTimer;
-TimerHandle_t enforceTimer;
-TimerHandle_t ecoTimer;
-TimerHandle_t offTimer;
-TaskHandle_t sensorsTaskHandle = NULL;
-// Add this near the top with your other globals:
-SemaphoreHandle_t irMutex;
+// --- Global definitions (declared extern in SharedState.h / used across files) ---
+SystemData sysData;          ///< The one shared real-time state instance.
+Preferences preferences;     ///< Shared NVS handle (namespace "ir_data").
+
+bool pendingReboot = false;      ///< Set by OTA/web to request a deferred reboot.
+unsigned long rebootTime = 0;    ///< millis() at which the deferred reboot fires.
+QueueHandle_t automationQueue;   ///< Event queue feeding the Automation task.
+TimerHandle_t healthTimer;       ///< 30s health-check timer.
+TimerHandle_t enforceTimer;      ///< 3-min AC re-assertion timer.
+TimerHandle_t ecoTimer;          ///< One-shot room-empty -> eco timer.
+TimerHandle_t offTimer;          ///< One-shot room-empty -> off timer.
+TaskHandle_t sensorsTaskHandle = NULL; ///< Sensor task handle (xTaskNotify target).
+SemaphoreHandle_t irMutex;       ///< Serialises all IR transmits across tasks.
 
 // ==========================================
 // Setup & Initialization
 // ==========================================
 
+/**
+ * @brief One-time boot: init hardware/subsystems, load NVS, spawn all tasks.
+ */
 void setup() {
     Serial.begin(115200);
 
@@ -122,12 +142,19 @@ void setup() {
 // Main Application Loop (Core 1, Priority 1)
 // ==========================================
 
+/**
+ * @brief Low-priority main loop: watchdog reset, status LED, deferred reboot.
+ *
+ * The functional work lives in the FreeRTOS tasks; this loop only keeps the
+ * task watchdog fed, refreshes the indicator LED from shared state, and
+ * executes a pending reboot once its scheduled time arrives.
+ */
 void loop() {
     esp_task_wdt_reset();
 
     // Handle reboots triggered by OTA or Web Dashboard safely
     if (pendingReboot && millis() > rebootTime) {
-        Serial.println("Rebooting now...");
+        ESP_LOGI(TAG, "Rebooting now...");
         ESP.restart();
     }
 

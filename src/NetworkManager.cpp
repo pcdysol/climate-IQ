@@ -1,3 +1,11 @@
+/**
+ * @file NetworkManager.cpp
+ * @brief Transport dispatcher: routes every call to WiFiManager or GSMManager.
+ *
+ * Each function checks sysData.switch_gsm_wifi and forwards to the active
+ * transport, so callers never branch on the link type. TaskNetwork drives the
+ * active transport's loop() while the device is not in AP mode.
+ */
 #include "NetworkManager.h"
 #include "WiFiManager.h"
 #include "GSMManager.h"
@@ -5,6 +13,7 @@
 
 namespace NetworkManager {
 
+    /// Initialise whichever transport is selected by sysData.switch_gsm_wifi.
     void init(SystemData* state) {
         if (state->switch_gsm_wifi) {
             WiFiManager::init();
@@ -13,6 +22,7 @@ namespace NetworkManager {
         }
     }
 
+    /// Service the active transport's loop().
     void loop() {
         if (sysData.switch_gsm_wifi) {
             WiFiManager::loop();
@@ -21,6 +31,7 @@ namespace NetworkManager {
         }
     }
 
+    /// Forward a command ACK to the active transport.
     void publishACK(const char *action, const char *detail) {
         if (sysData.switch_gsm_wifi) {
             WiFiManager::publishACK(action, detail);
@@ -29,6 +40,7 @@ namespace NetworkManager {
         }
     }
 
+    /// Forward a health/diagnostic alert to the active transport.
     void publishHealthAlert(const char *event, const char *detail) {
         if (sysData.switch_gsm_wifi) {
             WiFiManager::publishHealthAlert(event, detail);
@@ -37,6 +49,7 @@ namespace NetworkManager {
         }
     }
 
+    /// Forward an automation event (auto_event code) to the active transport.
     void sendAutomationEvent(String eventCode) {
         if (sysData.switch_gsm_wifi) {
             WiFiManager::sendAutomationEvent(eventCode);
@@ -45,6 +58,7 @@ namespace NetworkManager {
         }
     }
 
+    /// FreeRTOS task: pump the active transport's loop() unless in AP mode.
     void TaskNetwork(void *pvParameters) {
         for (;;) {
             if (!sysData.isAPMode) {

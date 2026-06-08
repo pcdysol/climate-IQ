@@ -1,8 +1,18 @@
+/**
+ * @file Indicator.cpp
+ * @brief Implementation of the RGB status LED, presence LED, and button.
+ *
+ * The RGB LED is common-anode (LOW = on). update() maps each SystemState to a
+ * colour + blink interval, with an offline-failsafe magenta override; the
+ * indicate*() helpers are short blocking flashes for discrete events.
+ * checkButton() debounces the config button into short/long-press events.
+ */
 #include "Indicator.h"
 #include "Config.h"
 
 namespace Indicator
 {
+    /// Drive the common-anode RGB pins (LOW = on) from boolean channel states.
     static void setColor(bool r, bool g, bool b)
     {
         // Common Anode: LOW = ON, HIGH = OFF
@@ -11,8 +21,10 @@ namespace Indicator
         digitalWrite(BLUE_PIN, b ? LOW : HIGH);
     }
 
+    /// Turn the RGB LED fully off.
     static void ledOff() { setColor(false, false, false); }
 
+    /// Configure the button (input pull-up) and all LED pins; start with LED off.
     void init()
     {
         pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -27,6 +39,7 @@ namespace Indicator
         ledOff();
     }
 
+    /// Blocking: two green blinks (operation succeeded).
     void indicateSuccess()
     {
         ledOff();
@@ -39,6 +52,7 @@ namespace Indicator
         }
     }
 
+    /// Blocking: three red blinks (operation failed).
     void indicateError()
     {
         ledOff();
@@ -51,6 +65,7 @@ namespace Indicator
         }
     }
 
+    /// Brief white flash signalling an IR frame was transmitted.
     void indicateIRSent()
     {
         setColor(true, true, true);
@@ -58,6 +73,13 @@ namespace Indicator
         ledOff();
     }
 
+    /**
+     * @brief Drive the presence + status LEDs for the current state (per main-loop tick).
+     *
+     * Lights the presence LED when radar is active and a person is present, then
+     * renders the RGB status pattern for @p state (solid, slow heartbeat, or
+     * blink). The offline-failsafe magenta override takes priority over all states.
+     */
     void update(SystemState state, bool isRadarActive, bool isHumanPresent)
     {
         // Physical hardware LED 2 for human presence indication
@@ -155,6 +177,11 @@ namespace Indicator
         }
     }
 
+    /**
+     * @brief Debounce the config button into press events (call every tick).
+     * @return BTN_LONG_PRESS once at the 5s hold mark, BTN_SHORT_PRESS on a
+     *         debounced release before that, else BTN_NONE.
+     */
     ButtonEvent checkButton()
     {
         static unsigned long pressedTime = 0;
@@ -191,6 +218,7 @@ namespace Indicator
         return BTN_NONE;
     }
 
+    /// Blocking: three yellow blinks (warning).
     void indicateWarning()
     {
         ledOff();

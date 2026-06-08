@@ -1,3 +1,12 @@
+/**
+ * @file OTAManager.cpp
+ * @brief Implementation of server-pull OTA with trial-boot rollback.
+ *
+ * See OTAManager.h for the end-to-end flow. init() runs first in setup() so the
+ * trial-boot counter advances even if a new image crashes during init; a job
+ * queued by requestUpdate() is flashed by TaskOTA; the new image is committed
+ * only after health is confirmed (MQTT reconnect), otherwise rolled back.
+ */
 #include "OTAManager.h"
 #include "config.h"
 #include "NetworkManager.h"
@@ -8,6 +17,11 @@
 #include <AsyncMqttClient.h>
 #include <atomic>
 #include "esp_ota_ops.h"
+#include "esp_log.h"
+
+// Log tag for this module. All ESP_LOGx() output is prefixed "OTA:" and can be
+// filtered at runtime, e.g. esp_log_level_set("OTA", ESP_LOG_DEBUG).
+static const char *TAG = "OTA";
 
 // AsyncMqttClient instance lives in WiFiManager.cpp (global). We disconnect it
 // just before flashing to free heap and avoid TLS + async-TCP contention.
@@ -32,6 +46,36 @@ namespace OTAManager {
     static char     bootReportVersion[24] = {0};
 
     const char *currentVersion() { return FW_VERSION; }
+
+    /**
+     * @brief Publish one OTA lifecycle phase to the backend over MQTT.
+     *
+     * The backend tracks these as a simple state machine. IMPORTANT: during the
+     * actual download + flash, MQTT is intentionally disconnected (to free heap),
+     * so NO message can be sent in that window. The expected sequence is:
+     *
+     *   downloading --> [device offline: flash + reboot + reconnect] --> success
+     *                                                                \--> failed
+     *                                                                \--> rolled_back
+     *
+     * So the backend should treat "downloading seen, but no terminal phase within
+     * a few minutes" as a stuck/failed update (a timeout) — the silent gap is
+     * normal and expected, just not forever.
+     *
+     * Payload is sent as the "detail" field of an {event:"ota"} message, formatted
+     * "<phase>,key=value,..." so it is trivial to parse:
+     *   downloading,version=1.0.2
+     *   success,version=1.0.2
+     *   failed,ret=-1,err=-104
+     *   rolled_back,version=1.0.0,failed_version=1.0.2
+     *   skipped,reason=not_newer,version=1.0.1
+     *   aborted,reason=no_wifi
+     *
+     * @param detail The fully-formatted phase string (see examples above).
+     */
+    static void reportPhase(const char *detail) {
+        NetworkManager::publishHealthAlert("ota", detail);
+    }
 
     // Compare dotted versions: returns >0 if a>b, 0 if equal, <0 if a<b.
     // Non-numeric / missing parts are treated as 0, so "1.2" == "1.2.0".
@@ -62,15 +106,15 @@ namespace OTAManager {
     static void rollbackToPrevious() {
         const esp_partition_t *prev = esp_ota_get_next_update_partition(NULL);
         if (prev == NULL) {
-            Serial.println("[OTA] Rollback aborted: no alternate partition found.");
+            ESP_LOGE(TAG, "Rollback aborted: no alternate partition found.");
             return;
         }
         esp_err_t err = esp_ota_set_boot_partition(prev);
         if (err != ESP_OK) {
-            Serial.printf("[OTA] Rollback aborted: set_boot_partition err=%d (no valid previous image?).\n", err);
+            ESP_LOGE(TAG, "Rollback aborted: set_boot_partition err=%d (no valid previous image?).", err);
             return;
         }
-        Serial.printf("[OTA] Rolling back to previous firmware on '%s'. Rebooting.\n", prev->label);
+        ESP_LOGW(TAG, "Rolling back to previous firmware on '%s'. Rebooting.", prev->label);
         vTaskDelay(pdMS_TO_TICKS(300));
         esp_restart();   // does not return
     }
@@ -92,8 +136,8 @@ namespace OTAManager {
             p.putString("state", "");
             p.end();
             esp_ota_mark_app_valid_cancel_rollback();   // this (old) image is trusted
-            Serial.printf("[OTA] Recovered to %s after failed update to %s.\n",
-                          FW_VERSION, bootReportVersion);
+            ESP_LOGW(TAG, "Recovered to %s after failed update to %s.",
+                     FW_VERSION, bootReportVersion);
             return;
         }
 
@@ -106,7 +150,7 @@ namespace OTAManager {
             if (boots > OTA_MAX_TRIAL_BOOTS) {
                 // The freshly-flashed image keeps rebooting without confirming health
                 // (it crashes / boot-loops). Mark it bad and revert.
-                Serial.printf("[OTA] Trial firmware failed to confirm after %d boots — rolling back.\n", boots);
+                ESP_LOGW(TAG, "Trial firmware failed to confirm after %d boots — rolling back.", boots);
                 Preferences p2;
                 p2.begin("ota", false);
                 p2.putString("state", "rolledback");   // so the old image reports it
@@ -115,7 +159,7 @@ namespace OTAManager {
                 p2.end();
                 rollbackToPrevious();                   // reboots into the old image
                 // If we reach here, rollback was not possible — stop trialling and run.
-                Serial.println("[OTA] Rollback unavailable — staying on new firmware.");
+                ESP_LOGE(TAG, "Rollback unavailable — staying on new firmware.");
                 clearTrialState();
                 return;
             }
@@ -126,8 +170,8 @@ namespace OTAManager {
             strncpy(bootReportVersion, tv.c_str(), sizeof(bootReportVersion) - 1);
             bootReportVersion[sizeof(bootReportVersion) - 1] = '\0';
             bootReportPending = true;
-            Serial.printf("[OTA] Booted firmware %s on TRIAL (attempt %d/%d) — awaiting health confirmation.\n",
-                          FW_VERSION, boots, OTA_MAX_TRIAL_BOOTS);
+            ESP_LOGI(TAG, "Booted firmware %s on TRIAL (attempt %d/%d) — awaiting health confirmation.",
+                     FW_VERSION, boots, OTA_MAX_TRIAL_BOOTS);
             return;
         }
         p.end();
@@ -139,15 +183,15 @@ namespace OTAManager {
 
     bool requestUpdate(const char *url, const char *version, bool force) {
         if (!sysData.switch_gsm_wifi) {
-            Serial.println("[OTA] Rejected: device is in GSM mode (OTA is WiFi-only).");
+            ESP_LOGW(TAG, "Rejected: device is in GSM mode (OTA is WiFi-only).");
             return false;
         }
         if (!url || strlen(url) == 0 || strlen(url) >= sizeof(reqUrl)) {
-            Serial.println("[OTA] Rejected: missing or oversized URL.");
+            ESP_LOGW(TAG, "Rejected: missing or oversized URL.");
             return false;
         }
         if (otaInProgress.load() || reqPending.load()) {
-            Serial.println("[OTA] Rejected: an update is already queued/running.");
+            ESP_LOGW(TAG, "Rejected: an update is already queued/running.");
             return false;
         }
         strncpy(reqUrl, url, sizeof(reqUrl) - 1);
@@ -159,8 +203,8 @@ namespace OTAManager {
         }
         reqForce = force;
         reqPending.store(true);   // set LAST — publishes the request to TaskOTA
-        Serial.printf("[OTA] Queued update -> %s (target ver '%s', force=%d)\n",
-                      reqUrl, reqVersion, reqForce);
+        ESP_LOGI(TAG, "Queued update -> %s (target ver '%s', force=%d)",
+                 reqUrl, reqVersion, reqForce);
         return true;
     }
 
@@ -170,8 +214,8 @@ namespace OTAManager {
         // 1. Guard rails ------------------------------------------------
         if (!sysData.switch_gsm_wifi || sysData.isAPMode ||
             WiFi.status() != WL_CONNECTED) {
-            Serial.println("[OTA] Abort: WiFi not connected / not in station mode.");
-            NetworkManager::publishHealthAlert("ota", "abort_no_wifi");
+            ESP_LOGE(TAG, "Abort: WiFi not connected / not in station mode.");
+            reportPhase("aborted,reason=no_wifi");
             otaInProgress.store(false);
             return;
         }
@@ -179,20 +223,24 @@ namespace OTAManager {
         // 2. Version gate ----------------------------------------------
         if (reqVersion[0] != '\0' && !reqForce &&
             versionCompare(reqVersion, FW_VERSION) <= 0) {
-            Serial.printf("[OTA] Skip: target %s not newer than running %s.\n",
-                          reqVersion, FW_VERSION);
+            ESP_LOGI(TAG, "Skip: target %s not newer than running %s.",
+                     reqVersion, FW_VERSION);
             char d[64];
-            snprintf(d, sizeof(d), "skip_not_newer_%s", reqVersion);
-            NetworkManager::publishHealthAlert("ota", d);
+            snprintf(d, sizeof(d), "skipped,reason=not_newer,version=%s", reqVersion);
+            reportPhase(d);
             otaInProgress.store(false);
             return;
         }
 
         // 3. Announce + flush, then free the async-MQTT/TLS heap --------
+        // This is the LAST message the backend hears until after the reboot:
+        // MQTT is disconnected right after, so the device goes silent through the
+        // whole download + flash + reboot window. The backend shows "updating"
+        // from here and starts a stuck-update timeout.
         char startMsg[64];
-        snprintf(startMsg, sizeof(startMsg), "start_%s",
+        snprintf(startMsg, sizeof(startMsg), "downloading,version=%s",
                  reqVersion[0] ? reqVersion : "unknown");
-        NetworkManager::publishHealthAlert("ota", startMsg);
+        reportPhase(startMsg);
         vTaskDelay(pdMS_TO_TICKS(800));    // let the async publish leave
         mqttClient.disconnect();           // frees AsyncTCP buffers for TLS
         vTaskDelay(pdMS_TO_TICKS(300));
@@ -216,12 +264,15 @@ namespace OTAManager {
         // 5. Run it -----------------------------------------------------
         httpUpdate.rebootOnUpdate(false);  // we reboot ourselves, cleanly
         httpUpdate.setLedPin(-1);
+        // Live download progress stays a raw Serial print: it uses a carriage
+        // return to overwrite the same line in place, which the line-oriented
+        // logger (timestamp/tag per call) can't do. Everything else is ESP_LOGx.
         httpUpdate.onProgress([](int cur, int total) {
             if (total > 0)
                 Serial.printf("[OTA] %d%%\r", (cur * 100) / total);
         });
 
-        Serial.printf("[OTA] Downloading from %s ...\n", reqUrl);
+        ESP_LOGI(TAG, "Downloading from %s ...", reqUrl);
         t_httpUpdate_return ret = httpUpdate.update(*client, reqUrl);
 
         // 6. Handle outcome --------------------------------------------
@@ -235,7 +286,7 @@ namespace OTAManager {
             p.putString("ver", reqVersion[0] ? reqVersion : FW_VERSION);
             p.putInt("boots", 0);
             p.end();
-            Serial.println("\n[OTA] SUCCESS — rebooting into new firmware (on trial).");
+            ESP_LOGI(TAG, "SUCCESS — rebooting into new firmware (on trial).");
             vTaskDelay(pdMS_TO_TICKS(500));
             ESP.restart();                 // does not return
         }
@@ -243,14 +294,14 @@ namespace OTAManager {
         // Failure: current firmware is untouched. WiFiManager::loop() will
         // reconnect MQTT on its own backoff; wait briefly so we can report.
         int err = httpUpdate.getLastError();
-        Serial.printf("\n[OTA] FAILED (ret=%d, err=%d) %s\n",
-                      ret, err, httpUpdate.getLastErrorString().c_str());
+        ESP_LOGE(TAG, "FAILED (ret=%d, err=%d) %s",
+                 ret, err, httpUpdate.getLastErrorString().c_str());
 
         for (int i = 0; i < 40 && !mqttClient.connected(); i++)
             vTaskDelay(pdMS_TO_TICKS(500)); // up to ~20s for MQTT to return
         char d[80];
-        snprintf(d, sizeof(d), "failed_ret%d_err%d", ret, err);
-        NetworkManager::publishHealthAlert("ota", d);
+        snprintf(d, sizeof(d), "failed,ret=%d,err=%d", ret, err);
+        reportPhase(d);
 
         otaInProgress.store(false);
     }
@@ -262,18 +313,18 @@ namespace OTAManager {
         if (onTrial.exchange(false)) {
             esp_ota_mark_app_valid_cancel_rollback();   // forward-compat with IDF rollback
             clearTrialState();
-            Serial.printf("[OTA] Health confirmed (MQTT up) — committed firmware %s.\n", FW_VERSION);
+            ESP_LOGI(TAG, "Health confirmed (MQTT up) — committed firmware %s.", FW_VERSION);
         }
 
         if (!bootReportPending) return;
         bootReportPending = false;
         char d[80];
         if (bootRolledBack)
-            snprintf(d, sizeof(d), "rolled_back_to_%s_from_%s", FW_VERSION, bootReportVersion);
+            snprintf(d, sizeof(d), "rolled_back,version=%s,failed_version=%s", FW_VERSION, bootReportVersion);
         else
-            snprintf(d, sizeof(d), "success_now_%s", FW_VERSION);
-        NetworkManager::publishHealthAlert("ota", d);
-        Serial.printf("[OTA] Reported '%s' to backend.\n", d);
+            snprintf(d, sizeof(d), "success,version=%s", FW_VERSION);
+        reportPhase(d);
+        ESP_LOGI(TAG, "Reported '%s' to backend.", d);
     }
 
     void TaskOTA(void *pvParameters) {
@@ -288,7 +339,7 @@ namespace OTAManager {
             // broker outage can't revert an otherwise-healthy device.
             if (OTA_TRIAL_CONFIRM_MS > 0 && onTrial.load() &&
                 (millis() - trialStartMs > (uint32_t)OTA_TRIAL_CONFIRM_MS)) {
-                Serial.println("[OTA] Trial confirm window elapsed without health — rolling back.");
+                ESP_LOGW(TAG, "Trial confirm window elapsed without health — rolling back.");
                 onTrial.store(false);
                 Preferences p;
                 p.begin("ota", false);

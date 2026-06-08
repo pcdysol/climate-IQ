@@ -1,3 +1,31 @@
+/**
+ * @file WebDashboard.cpp
+ * @brief Implementation of the SoftAP config portal + local web dashboard.
+ *
+ * Serves a single self-contained page (DASHBOARD_HTML, in PROGMEM) plus a set
+ * of JSON/text endpoints, all on a synchronous WebServer pumped by TaskWeb.
+ * Admin routes use HTTP basic auth; the developer panel is gated by a separate
+ * password (/devauth). Radar maintenance routes only SIGNAL the sensor task —
+ * they never touch the radar UART here.
+ *
+ * Route map:
+ *   GET  /                  dashboard page (admin auth)
+ *   POST /setwifi           save mode/SSID/pass, reboot (admin auth)
+ *   POST /exitap            leave AP mode without reboot (admin auth)
+ *   GET  /status            IR protocol, learned keys, creds/mode (JSON)
+ *   GET  /learn/*           learn protocol / ON / OFF / 24 / 26 / 28 / 30
+ *   GET  /reset             wipe learned IR data
+ *   GET  /resetwifi         wipe WiFi creds, reboot to AP
+ *   GET  /devauth           check developer password (JSON)
+ *   GET  /calibrate/auto    start radar auto-calibration
+ *   GET  /calibrate/reset   factory-reset the radar
+ *   GET  /calibrate/status  maintenance status (JSON)
+ *   POST /setrange          set radar detection range (cm)
+ *   GET  /devdata           live diagnostics + per-gate feed + remote log (JSON)
+ *   POST /setparams         save automation parameters
+ *   GET  /devschedule       dump stored schedule from NVS (JSON)
+ *   GET/POST /update        local-file OTA upload form / handler
+ */
 #include "WebDashboard.h"
 #include "Config.h"
 #include "IRManager.h"
@@ -11,6 +39,9 @@
 #include <ArduinoJson.h>
 #include "ScheduleManager.h"
 #include <nvs_flash.h>
+#include "esp_log.h"
+
+static const char *TAG = "WEB";
 
 // --- Externs (Grabbing from main.cpp) ---
 extern Preferences preferences;
@@ -21,7 +52,7 @@ extern AsyncMqttClient mqttClient;
 namespace WebDashboard
 {
   // --- Private Variables ---
-  static WebServer server(80);
+  static WebServer server(80); ///< Synchronous HTTP server (port 80), pumped by TaskWeb.
 
   // Deferred AP-mode exit: the /exitap route can't tear down the server from
   // inside its own request handler, so it sets this flag + a short delay and
@@ -29,6 +60,10 @@ namespace WebDashboard
   static bool pendingExitAP = false;
   static unsigned long exitAPTime = 0;
 
+  // Single-page dashboard (HTML + CSS + vanilla JS) served from flash. The JS
+  // polls /status and /devdata, and drives the IR-learning, calibration, range,
+  // and parameter endpoints. Kept as one PROGMEM literal so there are no extra
+  // files to serve.
   const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -478,7 +513,7 @@ window.onload=function(){refresh();};
 </html>
 )rawliteral";
 
-  // --- Private Route Setup ---
+  /// Register every HTTP route handler on the server (see the route map at top).
   static void setupRoutes()
   {
     // Require Admin Login for Dashboard
@@ -504,9 +539,8 @@ window.onload=function(){refresh();};
                     return;
                 }
 
-                Serial.println("\n[SYSTEM] Saving New Settings:");
-                Serial.println("Mode: " + modeStr);
-                Serial.println("SSID: " + newSSID);
+                ESP_LOGI(TAG, "Saving new settings: mode=%s ssid=%s",
+                         modeStr.c_str(), newSSID.c_str());
                 
                 preferences.putBool("use_wifi", isWiFi);
                 preferences.putString("wifi_ssid", newSSID);
@@ -735,7 +769,7 @@ window.onload=function(){refresh();};
                 changed = true;
             }
             if (changed) {
-                Serial.printf("[DEV] Params saved — Normal:%d°C Eco:%d°C TEco:%lums TOff:%lums\n",
+                ESP_LOGI(TAG, "Params saved — Normal:%d°C Eco:%d°C TEco:%lums TOff:%lums",
                     sysData.currentNormalTemp, sysData.currentEcoTemp, sysData.TEcoTime, sysData.TOffTime);
                 server.send(200, "text/plain", "Parameters saved successfully.");
             } else {
@@ -787,17 +821,25 @@ window.onload=function(){refresh();};
   }
 
   // --- Public Functions ---
+
+  /// Register all routes. Called once in setup() (the server starts in startAPMode()).
   void init()
   {
     setupRoutes();
   }
 
+  /**
+   * @brief Bring up the SoftAP and start serving the dashboard.
+   *
+   * Drops any active WiFi/MQTT connection, switches the radio to AP mode,
+   * starts the HTTP server, and marks the system in AP mode. No-op if already in AP.
+   */
   void startAPMode()
   {
     if (sysData.isAPMode)
       return;
     sysData.currentState = SYS_AP_MODE;
-    Serial.println("\n--- SWITCHING TO AP (DASHBOARD) MODE ---");
+    ESP_LOGI(TAG, "Switching to AP (dashboard) mode");
 
     if (sysData.switch_gsm_wifi)
     {
@@ -807,18 +849,24 @@ window.onload=function(){refresh();};
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.println("✓ HOTSPOT ACTIVE: Connect to " + String(AP_SSID));
+    ESP_LOGI(TAG, "Hotspot active: connect to %s", AP_SSID);
 
     server.begin();
     sysData.isAPMode = true;
     Indicator::indicateSuccess();
   }
 
+  /**
+   * @brief Tear down the SoftAP and return to the normal radio mode.
+   *
+   * Stops the server and AP, then restores station mode (WiFi) or radio-off
+   * (GSM). No-op if not currently in AP mode.
+   */
   void stopAPMode()
   {
     if (!sysData.isAPMode)
       return;
-    Serial.println("\n--- SWITCHING TO NORMAL MODE ---");
+    ESP_LOGI(TAG, "Switching to normal mode");
 
     server.stop();
     WiFi.softAPdisconnect(true);
@@ -834,7 +882,13 @@ window.onload=function(){refresh();};
     Indicator::indicateSuccess();
   }
 
-  // 1. Define the task privately inside the cpp file
+  /**
+   * @brief FreeRTOS task: service the web server while in AP mode.
+   *
+   * Pumps client requests and performs the deferred AP exit (the /exitap route
+   * can't tear down the server from inside its own handler, so it flags it and
+   * this task does it once the response has flushed). @note Spawned once; never returns.
+   */
   void TaskWeb(void *pvParameters)
   {
     for (;;)
@@ -853,6 +907,7 @@ window.onload=function(){refresh();};
     }
   }
 
+  /// Process one round of pending HTTP client requests.
   void handleClient()
   {
     server.handleClient();

@@ -1,3 +1,12 @@
+/**
+ * @file CommandProcessor.cpp
+ * @brief Implementation of the inbound MQTT JSON command dispatcher.
+ *
+ * Called from both transports' receive paths. See CommandProcessor.h for the
+ * full command vocabulary this file recognises. Each branch validates the
+ * relevant keys, performs the action (often via AutomationManager /
+ * ScheduleManager / IRManager), persists any settings to NVS, and ACKs.
+ */
 #include "CommandProcessor.h"
 #include "AutomationManager.h"
 #include "ScheduleManager.h"
@@ -6,14 +15,22 @@
 #include "NetworkManager.h"
 #include "OTAManager.h"
 #include <Preferences.h>
+#include "esp_log.h"
+
+static const char *TAG = "CMD";
 
 extern Preferences preferences;
 
 namespace CommandProcessor {
 
+    /**
+     * @brief Parse one inbound MQTT JSON document and trigger the matching action.
+     * @param doc Deserialized command payload.
+     * @return true if a known command matched and was acted on; false otherwise.
+     */
     bool processJSON(JsonDocument &doc) {
         bool isValidCommand = false;
-        
+
         // Extract the main command key sent by the backend
         String cmd = doc["command"].as<String>();
 
@@ -39,7 +56,9 @@ namespace CommandProcessor {
                     }
                 }
 
-                // IR code overrides the target temp when provided
+                // IR code overrides the target temp when provided.
+                // Backend "ir" command map: 3..17 -> temperature (cmdNum + 13),
+                // i.e. 3=16°C .. 17=30°C. (1/2 mean ON/OFF in the schedule path.)
                 if (doc["ir"]) {
                     int cmdNum = doc["ir"].as<int>();
                     targetTemp = (cmdNum >= 3 && cmdNum <= 17) ? (cmdNum + 13) : targetTemp;
@@ -96,7 +115,7 @@ namespace CommandProcessor {
         // =========================================================
         else if (cmd == "radar_control") {
             String radarStr = doc["radar"].as<String>();
-            Serial.println("Received Radar Value: " + radarStr);
+            ESP_LOGI(TAG, "Received Radar Value: %s", radarStr.c_str());
             const char *detail = "unchanged";
 
             if (radarStr == "0100" || radarStr == "256") {
@@ -104,7 +123,7 @@ namespace CommandProcessor {
                     sysData.radarAutoMode = true;
                     preferences.putBool("radar_auto", true);
                     sysData.lastPresenceTime = millis();
-                    Serial.println("Radar Automation: ENABLED");
+                    ESP_LOGI(TAG, "Radar Automation: ENABLED");
                     Indicator::indicateSuccess();
                 }
                 detail = "enabled";
@@ -112,7 +131,7 @@ namespace CommandProcessor {
                 if (sysData.radarAutoMode) {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
-                    Serial.println("Radar Automation: DISABLED");
+                    ESP_LOGI(TAG, "Radar Automation: DISABLED");
                     Indicator::indicateSuccess();
                 }
                 detail = "disabled";

@@ -1,3 +1,12 @@
+/**
+ * @file board_select.h
+ * @brief Per-board radar UART (sensorSerial) and RX/TX pin selection.
+ *
+ * Picks the HardwareSerial instance and default RX/TX pins for the LD2412 radar
+ * based on the compile target. On this project's ESP32 DevKit it resolves to
+ * Serial1 with RX=16 / TX=17. (From the upstream MyLD2410 library.)
+ */
+
 #if defined(ARDUINO_SAMD_NANO_33_IOT) || defined(ARDUINO_AVR_LEONARDO)
 // ARDUINO_SAMD_NANO_33_IOT RX_PIN is D1, TX_PIN is D0
 // ARDUINO_AVR_LEONARDO RX_PIN(RXI) is D0, TX_PIN(TXO) is D1

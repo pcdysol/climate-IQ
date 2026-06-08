@@ -1,3 +1,14 @@
+/**
+ * @file SensorManager.cpp
+ * @brief Implementation of LD2412 radar + HDC1080 sensor management.
+ *
+ * The sensor task is the SOLE owner of the radar UART. Normal operation streams
+ * "enhanced mode" frames (presence + per-gate energy); maintenance operations
+ * (calibration, factory reset, range set) briefly enter the radar's config mode,
+ * which stops frames — so each one re-enables streaming afterward and pokes the
+ * watchdog. Those operations are requested by other tasks via xTaskNotify bits
+ * and only ever execute here. See SensorManager.h for the public contract.
+ */
 #include "SensorManager.h"
 #include "Config.h"
 #include "Indicator.h" // For flashing errors during calibration
@@ -9,6 +20,9 @@
 #include "AutomationManager.h"
 #include "IRManager.h"
 #include "esp_task_wdt.h"
+#include "esp_log.h"
+
+static const char *TAG = "SENSOR";
 
 // --- Private Objects ---
 static Adafruit_HDC1000 hdc = Adafruit_HDC1000();
@@ -83,14 +97,21 @@ static void applyRadarRange(int cm)
     // HLK app also shows). After the +1 compensation this should equal the target gate.
     readAndStoreRange();
 
-    Serial.printf("[RADAR] setMaxGate %s: req=%dcm target_gate=%d wrote=%d -> radar now reports %dcm\n",
-                  ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
+    ESP_LOGI(TAG, "setMaxGate %s: req=%dcm target_gate=%d wrote=%d -> radar now reports %dcm",
+             ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
 }
 
 
 namespace SensorManager
 {
-
+    /**
+     * @brief Initialise the HDC1080 (I2C) and the LD2412 radar (UART), bind state.
+     *
+     * Keeps the radar bring-up deliberately minimal: drain startup noise, retry
+     * begin() a few times, then enable streaming only. Config-mode reads are
+     * avoided here — at boot the radar is still settling and a missed ACK can
+     * leave it stuck in config mode. @param state The shared state to bind to.
+     */
     void init(SystemData *state)
     {
         globalState = state;
@@ -101,11 +122,11 @@ namespace SensorManager
         if (!hdc.begin(0x40))
         {
             globalState->hdcInitFailed = true;
-            Serial.println("[SENSOR] HDC1080 Not Found!");
+            ESP_LOGE(TAG, "HDC1080 Not Found!");
         }
         else
         {
-            Serial.println("[SENSOR] HDC1080 Initialized.");
+            ESP_LOGI(TAG, "HDC1080 Initialized.");
         }
 
         // 2. Initialize LD2412 Radar — RX=17, TX=16 @ 115200 (confirmed)
@@ -120,7 +141,7 @@ namespace SensorManager
             delay(50);
         }
 
-        Serial.print("[SENSOR] Waiting for LD2412 boot...");
+        ESP_LOGI(TAG, "Waiting for LD2412 boot...");
         bool began = false;
         for (int attempt = 1; attempt <= 3 && !began; attempt++)
         {
@@ -138,13 +159,13 @@ namespace SensorManager
             radar.enhancedMode();
             globalState->sensorReady = true;
             globalState->lastRadarDataTime = millis();
-            Serial.println(" ✓ Success.");
+            ESP_LOGI(TAG, "Radar boot: success");
         }
         else
         {
             globalState->radarInitFailed = true;
             globalState->sensorReady = false;
-            Serial.println(" ✗ Failed!");
+            ESP_LOGE(TAG, "Radar boot: failed");
         }
 
         // --- DEBUG: scan all baud/pin combos (uncomment if radar stops working) ---
@@ -168,6 +189,14 @@ namespace SensorManager
         // ---------------------------------------------------------------------------
     }
 
+    /**
+     * @brief Read pending sensor data and update shared state.
+     *
+     * Polls the HDC1080 every ~10s, then drains one radar frame: updates
+     * presence/distance and the per-gate energy arrays, applies the flap-delay
+     * suppression window, and posts an EVENT_PRESENCE_CHANGED when presence
+     * flips. Runs continuously on the sensor task between maintenance requests.
+     */
     void poll()
     {
         if (!globalState)
@@ -218,7 +247,7 @@ namespace SensorManager
                 } else {
                     globalState->isFlapDelayActive = false;
                     flapJustExpired = true;
-                    Serial.println("[SENSOR] Flap delay expired. Resuming radar detection.");
+                    ESP_LOGI(TAG, "Flap delay expired. Resuming radar detection.");
                 }
             }
             // ------------------------------
@@ -248,7 +277,7 @@ namespace SensorManager
         if (hdc.begin(0x40))
         {
             globalState->hdcInitFailed = false;
-            Serial.println("[HEALTH] HDC1080 recovered!");
+            ESP_LOGI(TAG, "HDC1080 recovered!");
         }
     }
 
@@ -263,7 +292,7 @@ namespace SensorManager
             globalState->sensorReady = true;
             globalState->lastRadarDataTime = millis();
             // No range re-apply needed — the radar keeps its own range in flash.
-            Serial.println("[HEALTH] Radar recovered!");
+            ESP_LOGI(TAG, "Radar recovered!");
         }
     }
 
@@ -277,7 +306,7 @@ namespace SensorManager
         // noise floor itself. Per datasheet 2.2.14, the 0x1B status query reports a
         // flag — 1 = executing, 0 = not executing — NOT a percentage. So completion
         // is: we first SEE it executing, then wait for it to return to not-executing.
-        Serial.println("[CAL] Starting radar dynamic background correction...");
+        ESP_LOGI(TAG, "Calibration: starting radar dynamic background correction...");
         globalState->radarCalStatus = 1; // in progress
 
         // Radar enters config mode now and stops emitting data frames, so poll()
@@ -295,7 +324,7 @@ namespace SensorManager
         bool started = radar.autoThresholds();
         if (!started)
         {
-            Serial.println("[CAL] Radar did not accept the calibration command.");
+            ESP_LOGW(TAG, "Calibration: radar did not accept the command.");
             globalState->radarCalStatus = 3; // failed
             radar.begin();
             radar.enhancedMode();
@@ -335,8 +364,8 @@ namespace SensorManager
         }
 
         globalState->radarCalStatus = done ? 2 : 3;
-        Serial.println(done ? "[CAL] Calibration complete."
-                            : "[CAL] Calibration timed out / failed.");
+        ESP_LOGI(TAG, "%s", done ? "Calibration complete."
+                                 : "Calibration timed out / failed.");
 
         // Full resync so live streaming resumes and the NEXT run starts clean.
         radar.begin();
@@ -346,7 +375,7 @@ namespace SensorManager
 
     static void runRadarFactoryReset()
     {
-        Serial.println("[CAL] Resetting radar to factory defaults...");
+        ESP_LOGI(TAG, "Resetting radar to factory defaults...");
         globalState->radarCalStatus = 1; // in progress
 
         // Radar reboots and stops streaming during the reset, so poll() can't refresh
@@ -364,11 +393,11 @@ namespace SensorManager
             radar.begin();          // re-establish the link
             radar.enhancedMode();   // re-enable live energy streaming
             globalState->sensorReady = true;
-            Serial.println("[CAL] Radar factory reset complete.");
+            ESP_LOGI(TAG, "Radar factory reset complete.");
         }
         else
         {
-            Serial.println("[CAL] Radar rejected the factory-reset command.");
+            ESP_LOGW(TAG, "Radar rejected the factory-reset command.");
         }
 
         globalState->radarCalStatus = ok ? 2 : 3;
@@ -420,6 +449,12 @@ namespace SensorManager
         return globalState ? globalState->radarRangeCm.load() : 0;
     }
 
+    /**
+     * @brief Flag the radar for recovery if no frame has arrived for RADAR_STALE_MS.
+     *
+     * Called from the 30s health timer. Does not touch the UART itself — it just
+     * notifies the sensor task (bit 0), which performs the actual recovery.
+     */
     void checkHealth()
     {
         if (!globalState)
@@ -428,29 +463,43 @@ namespace SensorManager
         if (globalState->sensorReady && globalState->lastRadarDataTime > 0 &&
             (millis() - globalState->lastRadarDataTime > RADAR_STALE_MS))
         {
-            Serial.println("[HEALTH] Radar data is stale — notifying task for recovery...");
+            ESP_LOGW(TAG, "Radar data is stale — notifying task for recovery...");
             if (sensorsTaskHandle != NULL)
             {
                 xTaskNotify(sensorsTaskHandle, (1 << 0), eSetBits);
             }
         }
     }
-    // Global button processor (no longer needed inside a blocking smartDelay)
+    /// Poll the physical button; short press enters AP mode, long press exits it.
     void processButton()
     {
         ButtonEvent btn = Indicator::checkButton();
         if (btn == BTN_SHORT_PRESS)
         {
-            Serial.println("Short Button Press Detected: Switching to AP Mode");
+            ESP_LOGI(TAG, "Short button press detected: switching to AP mode");
             WebDashboard::startAPMode();
         }
         else if (btn == BTN_LONG_PRESS)
         {
-            Serial.println("Long Button Press Detected: Exiting AP Mode");
+            ESP_LOGI(TAG, "Long button press detected: exiting AP mode");
             WebDashboard::stopAPMode();
         }
     }
 
+    /**
+     * @brief FreeRTOS task: the sensor service loop.
+     *
+     * Each iteration either handles a pending maintenance notification OR polls
+     * the sensors. The notification bitmask selects the operation, all of which
+     * must run here because they touch the radar UART:
+     *   - bit 0: radar stale -> recover the link
+     *   - bit 1: run auto-calibration
+     *   - bit 2: factory-reset the radar
+     *   - bit 3: apply a new detection range
+     * It also runs the always-on IR-remote listener, the one-time boot range
+     * read, the button poll, and presence-time accounting every tick.
+     * @note Spawned once; never returns. Sole owner of the radar UART.
+     */
     void TaskSensors(void *pvParameters)
     {
         uint32_t notificationValue;
@@ -499,8 +548,8 @@ namespace SensorManager
                 globalState->remoteLogHead = (idx + 1) % REMOTE_LOG_SIZE;
                 globalState->remoteOverrideCount.fetch_add(1, std::memory_order_relaxed);
 
-                Serial.printf("[IR-RX] Manual remote press detected: %s 0x%lX\n",
-                              press.proto, (unsigned long)press.value);
+                ESP_LOGI(TAG, "Manual remote press detected: %s 0x%lX",
+                         press.proto, (unsigned long)press.value);
 
                 SystemEvent ev;
                 ev.type = EVENT_MANUAL_OVERRIDE;

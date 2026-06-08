@@ -2,6 +2,11 @@
 #include <Arduino.h>
 #include "SharedState.h"
 
+/**
+ * @file OTAManager.h
+ * @brief Server-based (pull) OTA firmware updates with trial-boot rollback.
+ */
+
 // ====================================================================
 //  OTAManager — server-based (pull) Over-The-Air firmware updates.
 //
@@ -20,6 +25,26 @@
 //
 //  A failed/aborted update is harmless: the device keeps running the
 //  current firmware and MQTT reconnects on its own.
+//
+//  --- Backend status phases (published as {event:"ota", detail:"<phase>,k=v"}) ---
+//  The device cannot stream a live % in production: MQTT is intentionally
+//  disconnected during the download+flash to free heap. So progress is reported
+//  as discrete PHASES, with a normal silent gap during the flash/reboot:
+//
+//    downloading,version=1.0.2          last msg before going offline
+//        |   (offline: download + flash + reboot + reconnect — expected silence)
+//        v
+//    success,version=1.0.2              new firmware booted & confirmed healthy
+//    failed,ret=-1,err=-104            flash failed; still on old firmware
+//    rolled_back,version=1.0.0,failed_version=1.0.2   bad update auto-reverted
+//
+//  Pre-flight phases (no offline gap, sent immediately):
+//    skipped,reason=not_newer,version=1.0.1
+//    aborted,reason=no_wifi
+//
+//  Backend rule of thumb: after "downloading", expect a terminal phase within a
+//  few minutes. If none arrives (and the device's normal telemetry also stops),
+//  treat it as a stuck/failed update via a timeout — the gap itself is normal.
 // ====================================================================
 namespace OTAManager {
 

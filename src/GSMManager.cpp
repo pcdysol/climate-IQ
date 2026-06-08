@@ -1,3 +1,16 @@
+/**
+ * @file GSMManager.cpp
+ * @brief Implementation of the GSM/cellular MQTT transport (raw AT commands).
+ *
+ * Talks to a Quectel-style modem over HardwareSerial(1) using AT commands.
+ * init() performs the full bring-up sequence (modem check -> SIM -> network
+ * registration -> PDP context -> QMTOPEN -> QMTCONN -> subscribe -> boot alert),
+ * retrying and power-cycling the radio on repeated failure. loop() polls for
+ * inbound messages, periodically resyncs the clock from the network, and
+ * publishes telemetry. Mirrors WiFiManager's publish API. See GSMManager.h.
+ *
+ * @note Shares UART pins with the radar — only one of GSM / radar can be active.
+ */
 #include "GSMManager.h"
 #include "config.h"
 #include "CommandProcessor.h"
@@ -5,24 +18,32 @@
 #include "NetworkManager.h"
 #include "esp_task_wdt.h"
 #include "WiFiManager.h"
+#include "esp_log.h"
+
+static const char *TAG = "GSM";
 
 extern SystemData sysData;
-unsigned long lastTelemetrygsm = 0;
-String lastSignalStrength = "N/A";
+unsigned long lastTelemetrygsm = 0;        ///< millis() of the last GSM telemetry publish.
+String lastSignalStrength = "N/A";         ///< Last read CSQ signal value (for telemetry).
 
 namespace GSMManager
 {
-    HardwareSerial SerialAT(1);
+    HardwareSerial SerialAT(1);            ///< UART link to the GSM modem.
 
-    String macAddress_gsm;
-    String gsmClientId;
-    String pubTopic;
-    String subTopic;
+    String macAddress_gsm;                 ///< Device MAC (client id base).
+    String gsmClientId;                    ///< MQTT client id.
+    String pubTopic;                       ///< Telemetry/ACK publish topic.
+    String subTopic;                       ///< Command subscription topic.
 
+    /**
+     * @brief Send a raw AT command and collect the modem's reply.
+     * @param command   AT command line (without trailing CR).
+     * @param timeoutMs Max time to wait for OK/ERROR/'>' before returning.
+     * @return The accumulated response text.
+     */
     String sendAT(String command, uint32_t timeoutMs = 2000)
     {
-        Serial.print(">> ");
-        Serial.println(command);
+        ESP_LOGD(TAG, ">> %s", command.c_str());
         SerialAT.println(command);
         String response = "";
         response.reserve(256);
@@ -37,10 +58,11 @@ namespace GSMManager
             if (response.indexOf("\r\nOK\r\n") != -1 || response.indexOf("\r\nERROR\r\n") != -1 || response.indexOf(">") != -1)
                 break;
         }
-        Serial.print(response);
+        ESP_LOGD(TAG, "<< %s", response.c_str());
         return response;
     }
 
+    /// Read one line from the modem; if it carries a +QMTRECV MQTT payload, dispatch it.
     void checkIncomingData()
     {
         static String incoming;
@@ -55,8 +77,7 @@ namespace GSMManager
         {
             incoming = SerialAT.readStringUntil('\n');
             {
-                Serial.print("\n[ASYNC] << ");
-                Serial.println(incoming);
+                ESP_LOGD(TAG, "<< %s", incoming.c_str());
                 if (incoming.indexOf("+QMTRECV:") != -1)
                 {
                     int jsonStart = incoming.indexOf('{');
@@ -67,12 +88,12 @@ namespace GSMManager
                         JsonDocument doc;
                         if (!deserializeJson(doc, jsonStr))
                         {
-                            Serial.println("\n[GSM] Message Received.");
+                            ESP_LOGI(TAG, "Message received.");
                             CommandProcessor::processJSON(doc);
                         }
                         else
                         {
-                            Serial.println("Failed to parse JSON from MQTT message.");
+                            ESP_LOGW(TAG, "Failed to parse JSON from MQTT message.");
                         }
                     }
                 }
@@ -80,6 +101,7 @@ namespace GSMManager
         }
     }
 
+    /// @return The CSQ signal-quality value as a string, or "N/A" if unparsable.
     String getSignalStrength()
     {
         String resp = sendAT("AT+CSQ", 2000);
@@ -97,6 +119,7 @@ namespace GSMManager
         return "N/A";
     }
 
+    /// @return The raw modem clock string from AT+CCLK?, or "N/A".
     String getModemTime()
     {
         String resp = sendAT("AT+CCLK?", 2000);
@@ -110,6 +133,7 @@ namespace GSMManager
         return "N/A";
     }
 
+    /// @return Local ISO-8601 timestamp from the modem clock + GMT offset (epoch fallback on failure).
     String getGSMTime()
     {
         String response = sendAT("AT+CCLK?", 2000);
@@ -135,9 +159,10 @@ namespace GSMManager
         return "1970-01-01T00:00:00";
     }
 
+    /// Publish an immediate automation event {timestamp, auto_event} via QMTPUB.
     void sendAutomationEvent(String eventCode)
     {
-        Serial.println("\n[EVENT] Sending immediate automation event: " + eventCode);
+        ESP_LOGI(TAG, "Sending immediate automation event: %s", eventCode.c_str());
         JsonDocument doc;
         String currentId = gsmClientId;
         JsonObject data = doc[currentId].to<JsonObject>();
@@ -153,16 +178,18 @@ namespace GSMManager
         {
             SerialAT.print(buffer);
             SerialAT.write(0x1A);
-            Serial.println("  -> Event sent via GSM MQTT");
+            ESP_LOGI(TAG, "  -> Event sent via GSM MQTT");
         }
         else
         {
-            Serial.println("  -> Failed to get GSM prompt for event.");
+            ESP_LOGW(TAG, "  -> Failed to get GSM prompt for event.");
         }
     }
 
+    /// @return Battery percentage placeholder (fixed; no battery gauge fitted).
     int batteryPercentage() { return 80; }
 
+    /// Publish a command acknowledgement {ack, action, detail} via QMTPUB.
     void publishACK(const char *action, const char *detail)
     {
         JsonDocument doc;
@@ -182,9 +209,10 @@ namespace GSMManager
             SerialAT.write(0x1A);
         }
 
-        Serial.printf("[ACK] action=%s detail=%s\n", action, detail);
+        ESP_LOGI(TAG, "ACK action=%s detail=%s", action, detail);
     }
 
+    /// Publish a health/diagnostic alert {event, detail} via QMTPUB.
     void publishHealthAlert(const char *event, const char *detail)
     {
         JsonDocument doc;
@@ -203,9 +231,10 @@ namespace GSMManager
             SerialAT.write(0x1A);
         }
 
-        Serial.printf("[HEALTH ALERT] %s — %s\n", event, detail);
+        ESP_LOGW(TAG, "HEALTH ALERT %s — %s", event, detail);
     }
 
+    /// Read the modem clock and set the ESP32 system time (UTC + GMT offset) from it.
     void setSystemTimeFromGSM()
     {
         String response = sendAT("AT+CCLK?", 2000);
@@ -227,21 +256,26 @@ namespace GSMManager
         utc += (GMT_OFFSET_SEC);
         struct timeval tv = {utc, 0};
         settimeofday(&tv, nullptr);
-        Serial.println("[SCHED] System clock synced from GSM modem.");
+        ESP_LOGI(TAG, "System clock synced from GSM modem.");
     }
 
+    /**
+     * @brief Full modem bring-up: SIM -> network -> PDP -> MQTT -> subscribe -> boot alert.
+     *
+     * Walks the AT sequence step by step, waiting on the relevant URCs and
+     * power-cycling the radio (AT+CFUN) after MAX_CONN_RETRIES failures. On
+     * success it sets the system clock from the network and publishes a boot
+     * report; the whole routine aborts early if the device enters AP mode.
+     */
     void init()
     {
         macAddress_gsm = WiFiManager::getChipMAC();
         gsmClientId = macAddress_gsm;
         pubTopic = "/topic/" + macAddress_gsm;
         subTopic = "/topic/" + macAddress_gsm;
-        Serial.print("GSM Client ID: ");
-        Serial.println(gsmClientId);
-        Serial.print("Pub Topic: ");
-        Serial.println(pubTopic);
-        Serial.print("Sub Topic: ");
-        Serial.println(subTopic);
+        ESP_LOGI(TAG, "GSM Client ID: %s", gsmClientId.c_str());
+        ESP_LOGI(TAG, "Pub Topic: %s", pubTopic.c_str());
+        ESP_LOGI(TAG, "Sub Topic: %s", subTopic.c_str());
         SerialAT.begin(115200, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
 
         int connFailCount = 0;
@@ -254,12 +288,12 @@ namespace GSMManager
                 break;
 
             sysData.currentState = SYS_GSM_CONN;
-            Serial.println("\n[STEP 1] Checking Modem...");
+            ESP_LOGI(TAG, "[STEP 1] Checking Modem...");
             sendAT("AT", 1000);
             sendAT("ATE0", 1000);
             sendAT("AT+CGMI", 2000);
 
-            Serial.println("\n[STEP 2] Checking SIM...");
+            ESP_LOGI(TAG, "[STEP 2] Checking SIM...");
             bool simReady = false;
 
             while (!simReady)
@@ -272,15 +306,15 @@ namespace GSMManager
                 if (simResp.indexOf("READY") != -1)
                 {
                     simReady = true;
-                    Serial.println("✓ SIM is inserted and ready!");
+                    ESP_LOGI(TAG, "SIM is inserted and ready!");
                 }
                 else
                 {
-                    Serial.println("⚠ SIM not inserted or not ready!");
-                    Serial.println("Waiting 10 seconds for user to insert SIM...");
+                    ESP_LOGW(TAG, "SIM not inserted or not ready!");
+                    ESP_LOGW(TAG, "Waiting 10 seconds for user to insert SIM...");
                     vTaskDelay(pdMS_TO_TICKS(10000));
 
-                    Serial.println("\nRestarting modem radio to scan the physical SIM slot...");
+                    ESP_LOGI(TAG, "Restarting modem radio to scan the physical SIM slot...");
                     sendAT("AT+CFUN=0", 5000);
                     vTaskDelay(pdMS_TO_TICKS(3000));
                     sendAT("AT+CFUN=1", 5000);
@@ -291,13 +325,13 @@ namespace GSMManager
             if (sysData.isAPMode)
                 break;
 
-            Serial.println("\n[DIAGNOSTICS] Checking Signal and Radio...");
+            ESP_LOGI(TAG, "[DIAGNOSTICS] Checking Signal and Radio...");
             sendAT("AT+CFUN=1", 3000);
             vTaskDelay(pdMS_TO_TICKS(2000));
             sendAT("AT+CSQ", 2000);
             sendAT("AT+COPS?", 2000);
 
-            Serial.println("\n[STEP 3] Waiting for Network Registration...");
+            ESP_LOGI(TAG, "[STEP 3] Waiting for Network Registration...");
             bool registered = false;
             for (int i = 0; i < 30; i++)
             {
@@ -307,20 +341,20 @@ namespace GSMManager
                 if (regResp.indexOf(",1") != -1 || regResp.indexOf(",5") != -1)
                 {
                     registered = true;
-                    Serial.println("✓ Network registered!");
+                    ESP_LOGI(TAG, "Network registered!");
                     break;
                 }
-                Serial.println("  ...still searching...");
+                ESP_LOGI(TAG, "  ...still searching...");
                 vTaskDelay(pdMS_TO_TICKS(2000));
             }
 
             if (!registered)
             {
-                Serial.println("✗ Network registration failed!");
+                ESP_LOGW(TAG, "Network registration failed!");
                 connFailCount++;
                 if (connFailCount >= MAX_CONN_RETRIES)
                 {
-                    Serial.println("\nMAX RETRIES — Restarting modem via AT+CFUN...");
+                    ESP_LOGW(TAG, "MAX RETRIES — Restarting modem via AT+CFUN...");
                     sendAT("AT+CFUN=0", 5000);
                     vTaskDelay(pdMS_TO_TICKS(3000));
                     sendAT("AT+CFUN=1", 5000);
@@ -330,12 +364,12 @@ namespace GSMManager
                 continue;
             }
 
-            Serial.println("\n[STEP 4] Activating PDP Context...");
+            ESP_LOGI(TAG, "[STEP 4] Activating PDP Context...");
             sendAT("AT+QIACT=1", 10000);
             vTaskDelay(pdMS_TO_TICKS(2000));
             sendAT("AT+QIACT?", 3000);
 
-            Serial.println("\n[STEP 5] Opening MQTT Connection...");
+            ESP_LOGI(TAG, "[STEP 5] Opening MQTT Connection...");
             sendAT("AT+QMTCLOSE=0", 3000);
             vTaskDelay(pdMS_TO_TICKS(1000));
 
@@ -345,7 +379,7 @@ namespace GSMManager
             String cmd = "AT+QMTOPEN=0,\"" + String(MQTT_SERVER) + "\"," + String(MQTT_PORT);
             sendAT(cmd, 5000);
 
-            Serial.println("  Waiting for +QMTOPEN URC...");
+            ESP_LOGI(TAG, "  Waiting for +QMTOPEN URC...");
             bool openSuccess = false;
             uint32_t waitStart = millis();
             String urcBuffer = "";
@@ -355,17 +389,16 @@ namespace GSMManager
                 {
                     char c = SerialAT.read();
                     urcBuffer += c;
-                    Serial.print(c);
                 }
                 if (urcBuffer.indexOf("+QMTOPEN: 0,0") != -1)
                 {
                     openSuccess = true;
-                    Serial.println("\n✓ MQTT TCP connection opened!");
+                    ESP_LOGI(TAG, "MQTT TCP connection opened!");
                     break;
                 }
                 if (urcBuffer.indexOf("+QMTOPEN: 0,-1") != -1 || urcBuffer.indexOf("ERROR") != -1)
                 {
-                    Serial.println("\n✗ MQTT TCP connection failed!");
+                    ESP_LOGE(TAG, "MQTT TCP connection failed!");
                     break;
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -376,7 +409,7 @@ namespace GSMManager
                 connFailCount++;
                 if (connFailCount >= MAX_CONN_RETRIES)
                 {
-                    Serial.println("\n⚠⚠⚠ MAX RETRIES — Restarting modem...");
+                    ESP_LOGW(TAG, "MAX RETRIES — Restarting modem...");
                     sendAT("AT+CFUN=0", 5000);
                     vTaskDelay(pdMS_TO_TICKS(3000));
                     sendAT("AT+CFUN=1", 5000);
@@ -388,7 +421,7 @@ namespace GSMManager
 
             vTaskDelay(pdMS_TO_TICKS(2000));
 
-            Serial.println("\n[STEP 6] Logging into MQTT Broker...");
+            ESP_LOGI(TAG, "[STEP 6] Logging into MQTT Broker...");
             cmd = "AT+QMTCONN=0,\"" + gsmClientId + "\"";
             String connResp = sendAT(cmd, 5000);
 
@@ -400,22 +433,21 @@ namespace GSMManager
                 {
                     char c = SerialAT.read();
                     connURC += c;
-                    Serial.print(c);
                 }
                 if (connURC.indexOf("+QMTCONN: 0,0,0") != -1)
                 {
                     mqttConnected = true;
-                    Serial.println("\n✓ MQTT broker connected!");
+                    ESP_LOGI(TAG, "MQTT broker connected!");
                     break;
                 }
                 if (connResp.indexOf("+CME ERROR") != -1 || connURC.indexOf("+CME ERROR") != -1)
                 {
-                    Serial.println("\n✗ +CME ERROR detected!");
+                    ESP_LOGE(TAG, "+CME ERROR detected!");
                     break;
                 }
                 if (connURC.indexOf("ERROR") != -1 || connURC.indexOf("+QMTCONN: 0,") != -1)
                 {
-                    Serial.println("\n✗ MQTT connect failed!");
+                    ESP_LOGE(TAG, "MQTT connect failed!");
                     break;
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -426,7 +458,7 @@ namespace GSMManager
                 connFailCount++;
                 if (connFailCount >= MAX_CONN_RETRIES)
                 {
-                    Serial.println("\n⚠⚠⚠ 3 FAILURES — RESTARTING MODEM ⚠⚠⚠");
+                    ESP_LOGW(TAG, "3 FAILURES — RESTARTING MODEM");
                     sendAT("AT+QMTCLOSE=0", 3000);
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     sendAT("AT+CFUN=0", 5000);
@@ -445,7 +477,7 @@ namespace GSMManager
         if (mqttConnected)
         {
             vTaskDelay(pdMS_TO_TICKS(2000));
-            Serial.println("\n[STEP 7] Subscribing to Topic...");
+            ESP_LOGI(TAG, "[STEP 7] Subscribing to Topic...");
             String cmd = "AT+QMTSUB=0,1,\"" + subTopic + "\",0";
             sendAT(cmd, 5000);
             uint32_t waitStart = millis();
@@ -454,8 +486,7 @@ namespace GSMManager
                 checkIncomingData();
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
-            Serial.println("\n============= SETUP COMPLETE =============");
-            Serial.println("✓ MQTT connected & subscribed!");
+            ESP_LOGI(TAG, "===== SETUP COMPLETE: MQTT connected & subscribed! =====");
             sysData.currentState = SYS_GSM_OK;
             setSystemTimeFromGSM();
 
@@ -473,29 +504,38 @@ namespace GSMManager
             {
                 SerialAT.print(bootBuf);
                 SerialAT.write(0x1A);
-                Serial.println("[BOOT] GSM boot alert sent.");
+                ESP_LOGI(TAG, "GSM boot alert sent.");
             }
         }
         else
         {
-            Serial.println("\n✗✗✗ FAILED to establish MQTT ✗✗✗");
+            ESP_LOGE(TAG, "FAILED to establish MQTT");
         }
     }
 
+    /**
+     * @brief Service tick: poll inbound messages, periodic RTC resync, publish telemetry.
+     *
+     * Every iteration drains any incoming MQTT data; every 30 min it resyncs the
+     * clock from the network; every TELEMETRY_INTERVAL it builds and publishes
+     * the telemetry payload via QMTPUB, emitting a sensor fault/recovery event on
+     * change. A modem ERROR on publish triggers an ESP restart to recover cleanly.
+     */
     void loop()
     {
         static bool bootReasonReported = false;
         // GSM Routine
         checkIncomingData();
-        // --- ADD THIS BLOCK: 30-Minute RTC Sync ---
+
+        // 30-minute RTC resync: cellular time drifts, so periodically overwrite the
+        // ESP32 clock with the network time fetched over AT commands.
         static unsigned long lastGsmTimeSync = 0;
         if (millis() - lastGsmTimeSync > 1800000)
         {
             lastGsmTimeSync = millis();
-            Serial.println("[GSM] 30-min periodic RTC sync triggered.");
-            setSystemTimeFromGSM(); // Fetches network time via AT commands and overwrites RTC
+            ESP_LOGI(TAG, "30-min periodic RTC sync triggered.");
+            setSystemTimeFromGSM();
         }
-        // ------------------------------------------
 
         if (millis() - lastTelemetrygsm >= TELEMETRY_INTERVAL)
         {
@@ -567,7 +607,7 @@ namespace GSMManager
             }
             if (currentSensorFaultGSM)
             {
-                Serial.println("HDC1080 Read Failed!");
+                ESP_LOGW(TAG, "HDC1080 Read Failed!");
                 data["sensor_status"] = "FAULT";
                 data["temperature"] = nullptr;
                 data["humidity"] = nullptr;
@@ -583,7 +623,7 @@ namespace GSMManager
             size_t gsmWritten = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
             if (gsmWritten >= sizeof(jsonBuffer))
             {
-                Serial.println("[GSM] ERROR: JSON payload truncated!");
+                ESP_LOGE(TAG, "JSON payload truncated!");
             }
             else
             {
@@ -594,28 +634,21 @@ namespace GSMManager
                 {
                     SerialAT.print(jsonBuffer);
                     SerialAT.write(0x1A);
-                    Serial.println(">> Payload sent via GSM!");
+                    ESP_LOGD(TAG, "Payload sent via GSM!");
                 }
                 else if (pubResp.indexOf("ERROR") != -1)
                 {
-                    Serial.println("\n[FATAL ERROR] Modem disconnected or crashed!");
-                    Serial.println("Rebooting ESP32 to re-establish clean connection...");
+                    ESP_LOGE(TAG, "Modem disconnected or crashed!");
+                    ESP_LOGE(TAG, "Rebooting ESP32 to re-establish clean connection...");
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     ESP.restart();
                 }
                 else
                 {
-                    Serial.println("✗ No '>' prompt received! QMTPUB failed.");
+                    ESP_LOGW(TAG, "No '>' prompt received! QMTPUB failed.");
                     sendAT("AT+QMTCONN?", 3000);
                 }
             }
         }
     }
-
-    // void publishACK(const char *action, const char *detail)
-    // {
-    // Build JSON and AT+QMTPUB
-    // }
-
-    // ... Implement sendAutomationEvent and publishHealthAlert
 }

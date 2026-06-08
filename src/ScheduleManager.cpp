@@ -1,3 +1,15 @@
+/**
+ * @file ScheduleManager.cpp
+ * @brief Implementation of the NVS-backed 7-day time-segment scheduler.
+ *
+ * Segments are packed to 9 bytes and stored per weekday (see save/loadSegment).
+ * TaskSchedule sleeps until each exact minute boundary, then applies the active
+ * segment's settings and sends IR as needed; it also distinguishes a "boot run"
+ * (first evaluation after power-up, which may need to catch up the AC state) from
+ * steady-state minute transitions. handleScheduleCommand() ingests backend
+ * "segments" updates (validate -> sort -> overlap-check -> persist -> apply).
+ * An offline failsafe forces radar control when no network time is available.
+ */
 #include <Arduino.h>
 #include "config.h"
 #include "SharedState.h"
@@ -7,14 +19,18 @@
 #include "AutomationManager.h"
 #include "Indicator.h"
 #include "NetworkManager.h"
+#include "esp_log.h"
+
+static const char *TAG = "SCHED";
 
 extern Preferences preferences;
 
 namespace ScheduleManager
 {
-    int lastScheduledMin = -1;
-    int lastScheduledWday = -1;
+    int lastScheduledMin = -1;   ///< Minute-of-day of the last evaluation (-1 = not yet run).
+    int lastScheduledWday = -1;  ///< Weekday of the last evaluation (-1 = not yet run).
 
+    /// @return Weekday index 0(Sun)-6(Sat) for an English day name, or -1 if unknown.
     int dayNameToWday(const String &day)
     {
         String d = day;
@@ -36,6 +52,7 @@ namespace ScheduleManager
         return -1;
     }
 
+    /// @return Stored segment count for @p wday (NVS key "sch_cnt_<wday>"), 0 if none.
     uint8_t loadSegmentCount(int wday)
     {
         char key[13];
@@ -43,6 +60,7 @@ namespace ScheduleManager
         return preferences.getUChar(key, 0);
     }
 
+    /// Set sysData.hasAnySchedule true if any of the 7 days has >=1 segment.
     void refreshHasAnySchedule()
     {
         for (int d = 0; d < 7; d++)
@@ -50,14 +68,19 @@ namespace ScheduleManager
             if (loadSegmentCount(d) > 0)
             {
                 sysData.hasAnySchedule = true;
-                Serial.println("[SCHED] hasAnySchedule = true (at least one day configured)");
+                ESP_LOGI(TAG, "hasAnySchedule = true (at least one day configured)");
                 return;
             }
         }
         sysData.hasAnySchedule = false;
-        Serial.println("[SCHED] hasAnySchedule = false (no segments — radar runs unconditionally)");
+        ESP_LOGI(TAG, "hasAnySchedule = false (no segments — radar runs unconditionally)");
     }
 
+    /**
+     * @brief Load one segment from the packed per-day NVS blob.
+     * @param wday Weekday 0-6. @param idx Segment index. @param out Filled on success.
+     * @return true if the blob holds at least @p idx+1 segments.
+     */
     bool loadSegment(int wday, int idx, ScheduleSegment &out)
     {
         char key[13];
@@ -78,6 +101,7 @@ namespace ScheduleManager
         return true;
     }
 
+    /// @return Temperature of the segment covering @p minute on @p wday, or 0 if none.
     int findSegmentTemp(int wday, int minute)
     {
         uint8_t count = loadSegmentCount(wday);
@@ -92,6 +116,7 @@ namespace ScheduleManager
         return 0;
     }
 
+    /// Find the segment covering @p minute on @p wday into @p out. @return true if found.
     bool findSegment(int wday, int minute, ScheduleSegment &out)
     {
         uint8_t count = loadSegmentCount(wday);
@@ -105,6 +130,7 @@ namespace ScheduleManager
         return false;
     }
 
+    /// @return true if every field of the two segments is identical.
     bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b)
     {
         return a.startMin == b.startMin &&
@@ -116,6 +142,12 @@ namespace ScheduleManager
                a.toff == b.toff;
     }
 
+    /**
+     * @brief Persist a day's segments (packed) plus its optional IR code/temp to NVS.
+     * @param wday  Weekday 0-6.       @param segs  Sorted segment array.
+     * @param count Number of segments. @param irHex Raw IR code/command for the day.
+     * @param irTemp Temperature the stored IR code corresponds to.
+     */
     void saveSchedule(int wday, const ScheduleSegment segs[], uint8_t count,
                       const String &irHex, int irTemp)
     {
@@ -146,6 +178,14 @@ namespace ScheduleManager
         preferences.putInt(key, irTemp);
     }
 
+    /**
+     * @brief Send the day's stored IR command for @p targetTemp, if one matches.
+     *
+     * Handles both forms of stored code: a small dashboard command number
+     * (1=ON, 2=OFF, 3-17=temperature) routed to the learned custom buttons, or
+     * a raw hex code sent via the saved protocol.
+     * @return true if a matching IR command was actually sent.
+     */
     bool sendScheduleIR(int wday, int targetTemp)
     {
         char key[13];
@@ -190,8 +230,8 @@ namespace ScheduleManager
                     if (!IRManager::playCustomButton(customKey.c_str()))
                         IRManager::sendACFallback(true, cmdTemp);
                 }
-                Serial.printf("[SCHED] Dashboard IR command %s sent for %dC schedule.\n",
-                              irHex.c_str(), targetTemp);
+                ESP_LOGI(TAG, "Dashboard IR command %s sent for %dC schedule.",
+                         irHex.c_str(), targetTemp);
                 return true;
             }
         }
@@ -207,12 +247,16 @@ namespace ScheduleManager
 
         if (success)
         {
-            Serial.printf("[SCHED] Schedule IR sent: 0x%s at %d°C\n", irHex.c_str(), targetTemp);
+            ESP_LOGI(TAG, "Schedule IR sent: 0x%s at %d°C", irHex.c_str(), targetTemp);
             return true;
         }
         return false;
     }
 
+    /**
+     * @brief Apply a segment's per-segment radar setting (unless user-overridden).
+     * @param radarSetting 0 = leave as-is, 1 = enable radar auto, 2 = disable.
+     */
     void applySegmentRadar(uint8_t radarSetting)
     {
         if (sysData.radarManualOverride)
@@ -225,16 +269,22 @@ namespace ScheduleManager
             sysData.radarAutoMode = true;
             sysData.lastPresenceTime = millis();
             preferences.putBool("radar_auto", true);
-            Serial.println("[SCHED] Segment enabled radar automation.");
+            ESP_LOGI(TAG, "Segment enabled radar automation.");
         }
         else if (radarSetting == 2 && sysData.radarAutoMode)
         {
             sysData.radarAutoMode = false;
             preferences.putBool("radar_auto", false);
-            Serial.println("[SCHED] Segment disabled radar automation.");
+            ESP_LOGI(TAG, "Segment disabled radar automation.");
         }
     }
 
+    /**
+     * @brief Apply a segment's eco temp / eco time / off time overrides to state + NVS.
+     *
+     * Each override only takes effect when non-zero (0 = inherit the global value).
+     * Off time is auto-corrected to always exceed eco time.
+     */
     void applySegmentParams(const ScheduleSegment &seg)
     {
         if (seg.eco > 0)
@@ -253,31 +303,41 @@ namespace ScheduleManager
             if (sysData.TOffTime <= sysData.TEcoTime)
             {
                 sysData.TOffTime = sysData.TEcoTime + 60000UL;
-                Serial.println("[SCHED] TOffTime auto-corrected.");
+                ESP_LOGI(TAG, "TOffTime auto-corrected.");
             }
             preferences.putULong("off_time", sysData.TOffTime);
         }
     }
 
+    /**
+     * @brief Ingest and apply a backend "segments" schedule-update command.
+     *
+     * Steps: resolve the day, parse + validate each segment (range/temp checks),
+     * insertion-sort by start time, reject overlaps, persist, and refresh
+     * hasAnySchedule. If the updated day is today, immediately re-evaluate the
+     * current minute so the AC/radar reflect the new schedule at once (taking
+     * care not to disturb a state radar is already managing). Clears any prior
+     * manual radar override.
+     */
     void handleScheduleCommand(JsonDocument &doc)
     {
         const char *day = doc["day"];
         if (!day)
         {
-            Serial.println("[SCHED] Missing 'day', ignoring.");
+            ESP_LOGW(TAG, "Missing 'day', ignoring.");
             return;
         }
 
         int wday = dayNameToWday(String(day));
         if (wday < 0)
         {
-            Serial.printf("[SCHED] Unknown day '%s', ignoring.\n", day);
+            ESP_LOGW(TAG, "Unknown day '%s', ignoring.", day);
             return;
         }
 
         if (!doc["segments"])
         {
-            Serial.println("[SCHED] Missing 'segments' key, ignoring.");
+            ESP_LOGW(TAG, "Missing 'segments' key, ignoring.");
             return;
         }
 
@@ -290,7 +350,7 @@ namespace ScheduleManager
         {
             if (count >= MAX_SEGS_PER_DAY)
             {
-                Serial.printf("[SCHED] WARNING: More than %d segments — truncating.\n", MAX_SEGS_PER_DAY);
+                ESP_LOGW(TAG, "More than %d segments — truncating.", MAX_SEGS_PER_DAY);
                 break;
             }
             int start = v["start"] | -1;
@@ -349,14 +409,14 @@ namespace ScheduleManager
             {
                 if (segs[i].endMin > segs[i + 1].startMin)
                 {
-                    Serial.println("[SCHED] ERROR: Overlapping segments detected — schedule rejected.");
+                    ESP_LOGE(TAG, "Overlapping segments detected — schedule rejected.");
                     return;
                 }
             }
         }
         else
         {
-            Serial.printf("[SCHED] Empty segments array received. Wiping schedule for %s.\n", day);
+            ESP_LOGI(TAG, "Empty segments array received. Wiping schedule for %s.", day);
         }
 
         String irHex = doc["ir"] | "";
@@ -389,7 +449,7 @@ namespace ScheduleManager
                 {
                     // Radar already drove AC to eco — silently update settings, let radar continue managing.
                     // (Only AUTO_ON_ECO is "managed by radar"; AUTO_OFF after a delete must be re-entered.)
-                    Serial.println("[SCHED] Schedule updated while in eco mode. Settings applied, no IR sent.");
+                    ESP_LOGI(TAG, "Schedule updated while in eco mode. Settings applied, no IR sent.");
                 }
                 else
                 {
@@ -435,7 +495,7 @@ namespace ScheduleManager
                 {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
-                    Serial.println("[SCHED] Schedule update: outside segments, radar disabled.");
+                    ESP_LOGI(TAG, "Schedule update: outside segments, radar disabled.");
                 }
                 sysData.radarManualOverride = false;
                 preferences.putBool("rad_ovr", false);
@@ -446,12 +506,24 @@ namespace ScheduleManager
             lastScheduledWday = wday;
         }
 
-        Serial.printf("[SCHED] %d segment(s) saved for %s (wday=%d)\n", count, day, wday);
+        ESP_LOGI(TAG, "%d segment(s) saved for %s (wday=%d)", count, day, wday);
         Indicator::indicateSuccess();
 
         NetworkManager::publishACK(count == 0 ? "schedule_cleared" : "schedule_saved", day);
     }
 
+    /**
+     * @brief FreeRTOS task: minute-aligned schedule evaluation + offline failsafe.
+     *
+     * While the clock is invalid (NTP/GSM not yet synced) it waits, and after 60s
+     * offline it engages the failsafe — forcing radar control so the room is still
+     * automated locally (magenta LED). Once time is valid it sleeps precisely until
+     * the next :00 second, then evaluates the current minute:
+     *   - Boot run (first evaluation): catch the AC up to where the schedule says it
+     *     should be, while respecting any decision radar already made during boot.
+     *   - Steady state: act only on real segment transitions (enter/leave/change).
+     * @note Spawned once; never returns.
+     */
     void TaskSchedule(void *pvParameters)
     {
         // Track boot time for the offline failsafe
@@ -471,7 +543,7 @@ namespace ScheduleManager
                 // prioritize local automation and force the radar to take over.
                 if (!offlineFailsafeTriggered && (millis() - offlineBootStart > 60000))
                 {
-                    Serial.println("[SCHED] Offline timeout! Prioritizing local automation. Forcing radar ON.");
+                    ESP_LOGW(TAG, "Offline timeout! Prioritizing local automation. Forcing radar ON.");
                     sysData.radarAutoMode = true;
                     offlineFailsafeTriggered = true;
                     sysData.isOfflineFailsafeActive = true; // <--- ADD THIS: Turn on Magenta
@@ -535,7 +607,7 @@ namespace ScheduleManager
                     {
                         sysData.radarAutoMode = false;
                         preferences.putBool("radar_auto", false);
-                        Serial.println("[SCHED] Recovery: No schedules for today. Radar disabled.");
+                        ESP_LOGI(TAG, "Recovery: No schedules for today. Radar disabled.");
 
                         if (!IRManager::playCustomButton("ir_off"))
                             IRManager::sendACFallback(false, 24);
@@ -572,9 +644,9 @@ namespace ScheduleManager
                         if (curState == AUTO_ON_ECO && sysData.TOffTime > 0)
                             xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
 
-                        Serial.printf("[SCHED] Boot %02d:%02d — radar managed (%s), schedule params applied, no IR\n",
-                                      timeinfo.tm_hour, timeinfo.tm_min,
-                                      curState == AUTO_ON_ECO ? "eco" : "off");
+                        ESP_LOGI(TAG, "Boot %02d:%02d — radar managed (%s), schedule params applied, no IR",
+                                 timeinfo.tm_hour, timeinfo.tm_min,
+                                 curState == AUTO_ON_ECO ? "eco" : "off");
                     }
                     else
                     {
@@ -595,14 +667,14 @@ namespace ScheduleManager
                         sysData.acAutoState = AUTO_ON_NORMAL;
                         if (sysData.radarAutoMode && !sysData.cachedPresence)
                         {
-                            Serial.println("[SCHED] AC ON via schedule, but room is empty. Starting timers.");
+                            ESP_LOGI(TAG, "AC ON via schedule, but room is empty. Starting timers.");
                             if (sysData.TEcoTime > 0)
                                 xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
                             if (sysData.TOffTime > 0)
                                 xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                         }
-                        Serial.printf("[SCHED] Boot %02d:%02d — inside segment, AC ON at %d°C\n",
-                                      timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
+                        ESP_LOGI(TAG, "Boot %02d:%02d — inside segment, AC ON at %d°C",
+                                 timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
                     }
                 }
                 else
@@ -616,12 +688,12 @@ namespace ScheduleManager
                     {
                         sysData.radarAutoMode = false;
                         preferences.putBool("radar_auto", false);
-                        Serial.println("[SCHED] Schedule gap reached: Radar automation disabled.");
+                        ESP_LOGI(TAG, "Schedule gap reached: Radar automation disabled.");
                     }
                     // -----------------------------------------------
                     Indicator::indicateIRSent();
-                    Serial.printf("[SCHED] Boot %02d:%02d — outside segments, AC OFF\n",
-                                  timeinfo.tm_hour, timeinfo.tm_min);
+                    ESP_LOGI(TAG, "Boot %02d:%02d — outside segments, AC OFF",
+                             timeinfo.tm_hour, timeinfo.tm_min);
                 }
                 continue;
             }
@@ -663,20 +735,20 @@ namespace ScheduleManager
                     // ---> THE FIX: Jumpstart timers if room is already empty on boot <---
                     if (sysData.radarAutoMode && !sysData.cachedPresence)
                     {
-                        Serial.println("[SCHED] AC ON via boot schedule, but room is empty. Starting timers.");
+                        ESP_LOGI(TAG, "AC ON via boot schedule, but room is empty. Starting timers.");
                         if (sysData.TEcoTime > 0)
                             xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
                         if (sysData.TOffTime > 0)
                             xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                     }
-                    Serial.printf("[SCHED] %02d:%02d -> ON at %dC\n",
-                                  timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+                    ESP_LOGI(TAG, "%02d:%02d -> ON at %dC",
+                             timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
                 }
                 else
                 {
                     // sysData.acAutoState = AUTO_ON_NORMAL;  //This state is already set from the previous segment, no need to set again
-                    Serial.printf("[SCHED] %02d:%02d -> segment updated, AC remains at %dC\n",
-                                  timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
+                    ESP_LOGI(TAG, "%02d:%02d -> segment updated, AC remains at %dC",
+                             timeinfo.tm_hour, timeinfo.tm_min, currentSeg.temp);
                 }
             }
             else
@@ -687,12 +759,12 @@ namespace ScheduleManager
                 {
                     sysData.radarAutoMode = false;
                     preferences.putBool("radar_auto", false);
-                    Serial.println("[SCHED] Schedule end: Radar automation disabled.");
+                    ESP_LOGI(TAG, "Schedule end: Radar automation disabled.");
                 }
                 sysData.radarManualOverride = false;
                 preferences.putBool("rad_ovr", false);
-                Serial.printf("[SCHED] %02d:%02d -> AC OFF (gap/end)\n",
-                              timeinfo.tm_hour, timeinfo.tm_min);
+                ESP_LOGI(TAG, "%02d:%02d -> AC OFF (gap/end)",
+                         timeinfo.tm_hour, timeinfo.tm_min);
             }
         }
     }

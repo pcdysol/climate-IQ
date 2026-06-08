@@ -5,143 +5,180 @@
 #include <freertos/timers.h>
 #include <atomic>
 
-// 1. Define the types of events that can wake up the Automation Manager
+/**
+ * @file SharedState.h
+ * @brief Central shared state, event/enum definitions, and global RTOS handles.
+ *
+ * Everything the FreeRTOS tasks need to communicate lives here:
+ *   - SystemEvent / EventType  — messages passed through automationQueue.
+ *   - The global RTOS handles   — queue, timers, IR mutex, task handles.
+ *   - SystemData (sysData)      — the one global struct holding all real-time
+ *                                 state. Fields touched by more than one task
+ *                                 are std::atomic; the rest follow a documented
+ *                                 single-writer convention (see per-field notes).
+ *
+ * @note There is exactly one instance, the global `sysData`, defined in main.cpp.
+ */
+
+/**
+ * @brief Event kinds that can wake the Automation task via automationQueue.
+ */
 enum EventType {
-    EVENT_PRESENCE_CHANGED,
-    EVENT_MQTT_COMMAND,
-    EVENT_SCHEDULE_TRIGGER,
-    EVENT_ECO_TRIGGER, // <--- ADD THIS
-    EVENT_OFF_TRIGGER,  // <--- ADD THIS
-    EVENT_ENFORCE_TRIGGER, // <--- ADD THIS
-    EVENT_MANUAL_OVERRIDE  // user pressed the AC remote (detected on the IR receiver)
+    EVENT_PRESENCE_CHANGED,   ///< Radar presence went true/false (payload 1/0).
+    EVENT_MQTT_COMMAND,       ///< Reserved — MQTT commands are handled in CommandProcessor.
+    EVENT_SCHEDULE_TRIGGER,   ///< Reserved — schedule changes act via ScheduleManager.
+    EVENT_ECO_TRIGGER,        ///< Eco countdown elapsed (room empty long enough).
+    EVENT_OFF_TRIGGER,        ///< Off countdown elapsed (room empty even longer).
+    EVENT_ENFORCE_TRIGGER,    ///< Periodic 3-min re-assertion of the AC state.
+    EVENT_MANUAL_OVERRIDE     ///< A foreign IR remote press was detected on the receiver.
 };
 
-// How many recent manual remote presses to keep for the dashboard "Remote Activity" card.
+/// How many recent manual remote presses to keep for the dashboard "Remote Activity" card.
 #define REMOTE_LOG_SIZE 5
 
-// 2. Define the message payload
+/**
+ * @brief Message payload carried on automationQueue.
+ */
 struct SystemEvent {
-    EventType type;
-    int payload; // e.g., Target temperature, or 1/0 for presence
+    EventType type;  ///< Which event occurred.
+    int payload;     ///< Event-specific data, e.g. target temperature, or 1/0 for presence.
 };
 
-// 3. Declare Global RTOS Handles so other files can use them
-extern QueueHandle_t automationQueue;
-extern TimerHandle_t healthTimer;
-extern TimerHandle_t enforceTimer;
-extern TimerHandle_t ecoTimer; // <--- ADD THIS
-extern TimerHandle_t offTimer; // <--- ADD THIS
+// --- Global RTOS handles (defined in main.cpp, declared here for all tasks) ---
+extern QueueHandle_t automationQueue; ///< Inbound event queue for the Automation task.
+extern TimerHandle_t healthTimer;     ///< 30s periodic health check.
+extern TimerHandle_t enforceTimer;    ///< 3-min periodic AC re-assertion.
+extern TimerHandle_t ecoTimer;        ///< One-shot: room-empty -> eco setpoint.
+extern TimerHandle_t offTimer;        ///< One-shot: room-empty -> AC off.
 
-// State machine for automation
+/**
+ * @brief AC automation state machine.
+ */
 enum AutoState {
-  AUTO_OFF,
-  AUTO_ON_NORMAL,
-  AUTO_ON_ECO
+  AUTO_OFF,        ///< AC is off.
+  AUTO_ON_NORMAL,  ///< AC on at the normal setpoint.
+  AUTO_ON_ECO      ///< AC on at the raised eco setpoint (room empty a while).
 };
 
+/**
+ * @brief One time slice of a daily schedule, packed to 9 bytes for NVS storage.
+ *
+ * Stored/loaded by ScheduleManager (see saveSchedule/loadSegment). Fields with
+ * a 0 "unset" sentinel inherit the corresponding global value at apply time.
+ */
 struct ScheduleSegment
 {
-  uint16_t startMin; // minutes from midnight (0-1439)
-  uint16_t endMin;   // minutes from midnight (1-1440, exclusive; 1440 = end of day)
-  uint8_t temp;      // target temperature (16-32)
-  uint8_t radar;     // 0=unset, 1=enable, 2=disable (per-segment)
-  uint8_t eco;       // eco temp override, 0 = inherit global
-  uint8_t teco;      // eco time minutes override, 0 = inherit global
-  uint8_t toff;      // off time minutes override, 0 = inherit global
+  uint16_t startMin; ///< Minutes from midnight (0-1439).
+  uint16_t endMin;   ///< Minutes from midnight (1-1440, exclusive; 1440 = end of day).
+  uint8_t temp;      ///< Target temperature (16-32).
+  uint8_t radar;     ///< Per-segment radar: 0=unset, 1=enable, 2=disable.
+  uint8_t eco;       ///< Eco temp override; 0 = inherit global.
+  uint8_t teco;      ///< Eco time (minutes) override; 0 = inherit global.
+  uint8_t toff;      ///< Off time (minutes) override; 0 = inherit global.
 }; // 9 bytes per segment
 
-// Represents the visual/network state of the system
+/**
+ * @brief Visual/network state of the system, used to drive the status LED.
+ */
 enum SystemState {
-    SYS_BOOTING,
-    SYS_AP_MODE,
-    SYS_WIFI_CONN,
-    SYS_WIFI_OK,
-    SYS_GSM_CONN,
-    SYS_GSM_OK,
-    SYS_ERROR
+    SYS_BOOTING,    ///< Power-on, before any connection attempt.
+    SYS_AP_MODE,    ///< SoftAP configuration portal active.
+    SYS_WIFI_CONN,  ///< WiFi connecting / reconnecting.
+    SYS_WIFI_OK,    ///< WiFi + (working towards) MQTT up.
+    SYS_GSM_CONN,   ///< GSM modem connecting.
+    SYS_GSM_OK,     ///< GSM + MQTT up.
+    SYS_ERROR       ///< Unrecoverable/error indication.
 };
 
-// Represents button interactions safely
+/**
+ * @brief Debounced button interaction reported by Indicator::checkButton().
+ */
 enum ButtonEvent {
-    BTN_NONE,
-    BTN_SHORT_PRESS,
-    BTN_LONG_PRESS
+    BTN_NONE,         ///< No event this poll.
+    BTN_SHORT_PRESS,  ///< Press < 5s released: enter AP mode.
+    BTN_LONG_PRESS    ///< Held >= 5s: exit AP mode.
 };
 
-// The central data structure holding real-time variables
+/**
+ * @brief The central real-time state object (single global instance: sysData).
+ *
+ * Concurrency convention: std::atomic fields may be read/written from any task;
+ * plain fields are written by a single owning task (noted inline) and only read
+ * elsewhere, where torn reads are harmless (diagnostics) or naturally aligned.
+ */
 struct SystemData {
     // --- Network & Mode ---
-    SystemState currentState = SYS_BOOTING;
-    bool isAPMode = false;
-    bool switch_gsm_wifi = true; // true = WiFi, false = GSM
+    SystemState currentState = SYS_BOOTING; ///< Current connection/visual state.
+    bool isAPMode = false;                  ///< True while the SoftAP config portal is up.
+    bool switch_gsm_wifi = true;            ///< Transport select: true = WiFi, false = GSM.
 
     // --- Sensor Readings ---
-    float currentTemp = 0.0;
-    float currentHumidity = 0.0;
-    bool hdcInitFailed = false;
+    float currentTemp = 0.0;       ///< Last HDC1080 temperature (°C); NaN on fault.
+    float currentHumidity = 0.0;   ///< Last HDC1080 relative humidity (%); NaN on fault.
+    bool hdcInitFailed = false;    ///< HDC1080 failed to initialise at boot.
 
     // --- Radar State ---
-    bool sensorReady = false;
-    std::atomic<bool> cachedPresence{false};
-    std::atomic<bool> radarAutoMode{false};
-    unsigned long lastRadarDataTime = 0;
-    float radarDistance = 0.0;
+    bool sensorReady = false;                    ///< Radar link established and streaming.
+    std::atomic<bool> cachedPresence{false};     ///< Latest debounced presence reading.
+    std::atomic<bool> radarAutoMode{false};      ///< Radar-driven automation enabled.
+    unsigned long lastRadarDataTime = 0;         ///< millis() of last radar frame (staleness check).
+    float radarDistance = 0.0;                   ///< Live target distance (cm).
 
     // --- Radar Live Engineering Data (per-gate energy, LD2412 = 14 gates) ---
     // Written by the sensor task in poll(), read by the web task for the dev feed.
     // Torn reads are harmless here (diagnostic only, values 0-100).
-    uint8_t radarMovingEnergy[14] = {0};
-    uint8_t radarStaticEnergy[14] = {0};
-    uint8_t radarGateCount = 0;
+    uint8_t radarMovingEnergy[14] = {0};  ///< Per-gate moving-target energy.
+    uint8_t radarStaticEnergy[14] = {0};  ///< Per-gate static-target energy.
+    uint8_t radarGateCount = 0;           ///< Number of valid gates in the arrays above.
 
     // --- Web-triggered radar maintenance (executed on the sensor task) ---
-    // 0 = idle, 1 = in progress, 2 = success, 3 = failed
-    std::atomic<int> radarCalStatus{0};
+    std::atomic<int> radarCalStatus{0};   ///< 0 idle, 1 in progress, 2 success, 3 failed.
 
     // --- Radar detection-range control (executed on the sensor task) ---
     // Web writes radarDesiredCm + notifies the sensor task (bit 3); the sensor task
     // snaps it to the nearest gate, applies setMaxGate(), and writes the achieved
     // boundary back to radarRangeCm for the dashboard to display.
-    std::atomic<int> radarDesiredCm{0}; // requested boundary in cm (web → sensor task)
-    std::atomic<int> radarRangeCm{0};   // last range read back from the radar (display)
+    std::atomic<int> radarDesiredCm{0}; ///< Requested boundary in cm (web -> sensor task).
+    std::atomic<int> radarRangeCm{0};   ///< Last range read back from the radar (display).
 
     // --- Manual remote-press detection log (IR receiver is always listening) ---
     // Written by the sensor task when a foreign IR frame is detected, read by the
     // web task for the "Remote Activity" dashboard card. Torn reads are harmless
     // here (diagnostic only). atMillis == 0 marks an empty slot.
     struct RemotePressEntry {
-        uint32_t atMillis = 0;
-        char text[24] = {0}; // e.g. "COOLIX 0xB2BF40"
+        uint32_t atMillis = 0;  ///< millis() when detected; 0 = empty slot.
+        char text[24] = {0};    ///< Human-readable, e.g. "COOLIX 0xB2BF40".
     } remoteLog[REMOTE_LOG_SIZE];
-    uint8_t remoteLogHead = 0;             // next slot to write
-    std::atomic<uint32_t> remoteOverrideCount{0}; // total presses since boot
+    uint8_t remoteLogHead = 0;                    ///< Next slot to write (ring buffer).
+    std::atomic<uint32_t> remoteOverrideCount{0}; ///< Total presses since boot.
 
     // --- Automation Settings ---
-    int currentNormalTemp = 24;
-    int currentEcoTemp = 26;
-    unsigned long TEcoTime = 120000;
-    unsigned long TOffTime = 300000;
-    unsigned long lastPresenceTime = 0;
-    bool radarManualOverride = false;
-    bool radarManualValue = false;
-    bool radarInitFailed = false;
-    bool lastPresenceState = false;
-    unsigned long lastStateChangeTime = 0;
-    // --- Automation Settings ---
-    bool isOfflineFailsafeActive = false;  // <--- ADD THIS
-    unsigned long flapDelaySec = 10;       // Customizable seconds to ignore radar
-    unsigned long flapDelayStart = 0;      // Timestamp of when OFF was sent
-    bool isFlapDelayActive = false;        // Flag to enable the blind spot
+    int currentNormalTemp = 24;            ///< Active "on" setpoint (°C).
+    int currentEcoTemp = 26;               ///< Active eco setpoint (°C).
+    unsigned long TEcoTime = 120000;       ///< Room-empty delay before eco (ms).
+    unsigned long TOffTime = 300000;       ///< Room-empty delay before off (ms).
+    unsigned long lastPresenceTime = 0;    ///< millis() of last detected presence.
+    bool radarManualOverride = false;      ///< User MQTT command pinned radar on/off.
+    bool radarManualValue = false;         ///< The pinned radar value (with the flag above).
+    bool radarInitFailed = false;          ///< Radar failed to initialise at boot.
+    bool lastPresenceState = false;        ///< Prev presence (sensor task only; presence-time accounting).
+    unsigned long lastStateChangeTime = 0; ///< Timestamp anchor for presence-time accounting.
+    bool isOfflineFailsafeActive = false;  ///< Offline failsafe engaged (magenta LED).
+    unsigned long flapDelaySec = 10;       ///< Seconds to ignore radar after an OFF.
+    unsigned long flapDelayStart = 0;      ///< millis() when the flap delay began.
+    bool isFlapDelayActive = false;        ///< Flap-delay blind spot currently active.
+
     // --- State Machine & Scheduling ---
-    std::atomic<AutoState> acAutoState{AUTO_OFF};
-    std::atomic<bool> isInsideSchedule{false};
-    bool hasAnySchedule = false;
-    unsigned long lastCommandTime = 0;
-    std::atomic<uint32_t> accumulatedPresenceMs{0};
+    std::atomic<AutoState> acAutoState{AUTO_OFF};      ///< Current AC state machine state.
+    std::atomic<bool> isInsideSchedule{false};         ///< Now within a configured segment.
+    bool hasAnySchedule = false;                       ///< Any day has >=1 segment configured.
+    unsigned long lastCommandTime = 0;                 ///< millis() of the last AC command sent.
+    std::atomic<uint32_t> accumulatedPresenceMs{0};    ///< Occupied-time accumulator (harvested by telemetry).
 };
 
-// Expose the global state object to any file that includes this header
+/// The single global state instance (defined in main.cpp).
 extern SystemData sysData;
-// 3. At the bottom of the file (with the other externs), add:
+/// IR transmit mutex — serialises all sends across tasks (defined in main.cpp).
 extern SemaphoreHandle_t irMutex;
-extern TaskHandle_t sensorsTaskHandle; // Expose the task handle
+/// Sensor task handle — target of xTaskNotify() for health/cal/reset/range triggers.
+extern TaskHandle_t sensorsTaskHandle;

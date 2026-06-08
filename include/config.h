@@ -1,5 +1,14 @@
 #pragma once
 
+/**
+ * @file config.h
+ * @brief Compile-time configuration: pins, credentials, timings, OTA settings.
+ *
+ * Central place for all tunable constants and hardware mapping. Grouped into:
+ * 1) hardware pins, 2) network/broker, 3) sensor/health timings,
+ * 4) automation defaults, 5) MQTT telemetry, 6) server-based OTA.
+ */
+
 #include <Arduino.h> // Needed for standard types like uint8_t and unsigned long
 
 // ====================================================================

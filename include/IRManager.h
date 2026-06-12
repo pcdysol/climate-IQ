@@ -22,6 +22,9 @@ namespace IRManager {
     struct RemotePress {
         char proto[16];  ///< Protocol name, e.g. "COOLIX" / "UNKNOWN".
         uint32_t value;  ///< Low 32 bits of the decoded value (display/debounce only).
+        bool isOurAc;    ///< Frame decoded AND matches the saved AC protocol.
+        bool power;      ///< Decoded AC power state (valid only when isOurAc).
+        int  temp;       ///< Decoded AC setpoint in °C (valid only when isOurAc).
     };
 
     /// Initialise IR hardware (sender, receiver, MOSFET power). Called once in setup().

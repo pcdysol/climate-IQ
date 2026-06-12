@@ -8,7 +8,7 @@
  * only after health is confirmed (MQTT reconnect), otherwise rolled back.
  */
 #include "OTAManager.h"
-#include "config.h"
+#include "Config.h"
 #include "NetworkManager.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>

@@ -130,6 +130,14 @@ namespace Indicator
             b = 0;
             interval = 5000;
             break;
+        case SYS_MQTT_DOWN:
+            // WiFi is up but we're NOT sending data to the broker. Distinct amber
+            // blink so this is never mistaken for the green "OK" state.
+            r = 1;
+            g = 1;
+            b = 0;
+            interval = 500;
+            break;
         case SYS_GSM_CONN:
             r = 1;
             g = 0;
@@ -155,10 +163,11 @@ namespace Indicator
             setColor(r, g, b);
         }
         else if (interval == 5000)
-        { // Heartbeat
+        { // Heartbeat: ON for 200ms every 5s. Long enough to actually SEE that
+          // the device is healthy (the old 50ms flash looked like a dead LED).
             if (now - lastBlink > 5000)
                 lastBlink = now;
-            if (now - lastBlink < 50)
+            if (now - lastBlink < 200)
                 setColor(r, g, b);
             else
                 ledOff();

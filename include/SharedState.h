@@ -84,7 +84,8 @@ enum SystemState {
     SYS_BOOTING,    ///< Power-on, before any connection attempt.
     SYS_AP_MODE,    ///< SoftAP configuration portal active.
     SYS_WIFI_CONN,  ///< WiFi connecting / reconnecting.
-    SYS_WIFI_OK,    ///< WiFi + (working towards) MQTT up.
+    SYS_WIFI_OK,    ///< WiFi up AND MQTT connected — actually delivering data.
+    SYS_MQTT_DOWN,  ///< WiFi associated but MQTT broker session down (NOT sending).
     SYS_GSM_CONN,   ///< GSM modem connecting.
     SYS_GSM_OK,     ///< GSM + MQTT up.
     SYS_ERROR       ///< Unrecoverable/error indication.
@@ -171,6 +172,7 @@ struct SystemData {
     // --- State Machine & Scheduling ---
     std::atomic<AutoState> acAutoState{AUTO_OFF};      ///< Current AC state machine state.
     std::atomic<bool> isInsideSchedule{false};         ///< Now within a configured segment.
+    std::atomic<bool> scheduleBootDone{false};         ///< Schedule has made its first authoritative AC decision this boot. Until then radar may NOT drive the AC ("schedule is king"); the offline failsafe bypasses this.
     bool hasAnySchedule = false;                       ///< Any day has >=1 segment configured.
     unsigned long lastCommandTime = 0;                 ///< millis() of the last AC command sent.
     std::atomic<uint32_t> accumulatedPresenceMs{0};    ///< Occupied-time accumulator (harvested by telemetry).

@@ -10,7 +10,7 @@
  * WiFiManager.h for the public API.
  */
 #include "WiFiManager.h"
-#include "config.h"
+#include "Config.h"
 #include "CommandProcessor.h"
 #include "HealthManager.h"
 #include <WiFi.h>
@@ -18,7 +18,7 @@
 #include <Preferences.h>
 #include "SharedState.h"
 #include "esp_task_wdt.h"
-#include "indicator.h"
+#include "Indicator.h"
 #include "GSMManager.h"
 #include "OTAManager.h"
 #include "esp_sntp.h"
@@ -82,7 +82,9 @@ namespace WiFiManager
         char msgBuffer[len + 1];
         memcpy(msgBuffer, payload, len);
         msgBuffer[len] = '\0';
-        ESP_LOGI(TAG, "Message received: %s", msgBuffer);
+        // Debug-level: the full inbound JSON is verbose (every telemetry echo +
+        // command). Compiled out at CORE_DEBUG_LEVEL=3; raise to 4 to see it.
+        ESP_LOGD(TAG, "Message received: %s", msgBuffer);
 
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, msgBuffer);
@@ -128,7 +130,10 @@ namespace WiFiManager
             vTaskDelay(pdMS_TO_TICKS(100));
         }
         ESP_LOGI(TAG, "WiFi connected");
-        sysData.currentState = SYS_WIFI_OK;
+        // WiFi is up but MQTT hasn't connected yet — show amber (not green) until
+        // the broker session is actually established. loop() promotes this to
+        // SYS_WIFI_OK only once mqttClient.connected() is true.
+        sysData.currentState = SYS_MQTT_DOWN;
         ESP_LOGI(TAG, "IP: %s", WiFi.localIP().toString().c_str());
     }
 
@@ -235,7 +240,7 @@ namespace WiFiManager
             sntp_set_sync_interval(30000);
 
             // 2. Fire and forget - LwIP handles internal retries
-            configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+            configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, NTP_SERVER2, NTP_SERVER3);
             ESP_LOGI(TAG, "Time sync requested via LwIP...");
         }
         else
@@ -245,6 +250,11 @@ namespace WiFiManager
 
         mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
         mqttClient.setClientId(device_id.c_str());
+        // Detect a dead / half-open broker socket fast: without this the client
+        // can believe it is still connected (publish() returns success) while the
+        // bytes never reach the broker. A short keepalive forces a PINGREQ and
+        // tears the session down within ~15s so reconnect/backoff can recover.
+        mqttClient.setKeepAlive(15);
         // 1. Setup the real Last Will (Broker sends this automatically if device dies)
         globalLwtTopic = "/status/" + device_id;
         globalLwtMessage = "{\"" + device_id + "\": {\"status\": \"Offline\", \"reason\": \"Connection Lost\"}}";
@@ -295,15 +305,24 @@ namespace WiFiManager
 
         if (sysData.currentState == SYS_WIFI_CONN)
         {
-            ESP_LOGI(TAG, "Reconnected!");
-            sysData.currentState = SYS_WIFI_OK;
+            ESP_LOGI(TAG, "WiFi reconnected!");
             wifiBackoffMs = 5000;
+            // WiFi just came back. The MQTT backoff may have grown to the cap while
+            // we were offline; if we don't reset it, MQTT sits idle waiting out that
+            // stale timer (we saw ~33s of dead air after a WiFi recovery). Reset the
+            // backoff and clear lastMqttRetry so MQTT reconnects immediately now.
+            mqttBackoffMs = 5000;
+            lastMqttRetry = 0;
             // Re-assert SNTP servers upon reconnect to ensure LwIP resumes
-            configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+            configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, NTP_SERVER2, NTP_SERVER3);
         }
 
         if (!mqttClient.connected())
         {
+            // WiFi is associated but the MQTT broker session is down, so we are
+            // NOT delivering data. Show this as its own amber state instead of the
+            // green "OK" — green must only ever mean "actually sending".
+            sysData.currentState = SYS_MQTT_DOWN;
             if (millis() - lastMqttRetry >= mqttBackoffMs)
             {
                 lastMqttRetry = millis();
@@ -313,6 +332,10 @@ namespace WiFiManager
             }
             return;
         }
+
+        // Past both guards: WiFi up AND MQTT connected — the only true "online and
+        // delivering" state, and the only one that shows the green LED.
+        sysData.currentState = SYS_WIFI_OK;
 
         if (millis() - lastTelemetry > TELEMETRY_INTERVAL)
         {

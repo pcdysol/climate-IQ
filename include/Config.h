@@ -16,7 +16,7 @@
 // ====================================================================
 
 // --- Core Pins ---
-#define BUTTON_PIN      26
+#define BUTTON_PIN      13
 #define LED_PIN         2
 #define MOSFET_PIN      27
 
@@ -51,7 +51,13 @@
 #define MQTT_PORT       1883
 
 // ===== NTP (Internet Time) =====
+// Three servers for resilience: pool.ntp.org is preferred but is frequently slow
+// or blocked on captive/filtered networks. Google's and Cloudflare's time servers
+// use fixed anycast IPs that resolve where the pool often won't, so the clock
+// still syncs (and the schedule can run) on those networks.
 #define NTP_SERVER      "pool.ntp.org"
+#define NTP_SERVER2     "time.google.com"
+#define NTP_SERVER3     "time.cloudflare.com"
 #define GMT_OFFSET_SEC  (5 * 3600)
 #define DAYLIGHT_OFFSET_SEC 0
 
@@ -65,8 +71,11 @@
 // ===== HDC1080 Settings =====
 #define HDC_REINIT_THRESHOLD    3         // Attempt I2C reset after this many consecutive NaN reads
 
-// ===== Time after it stops retrying for wifi reconnection =====
-#define MAX_BACKOFF_MS          300000UL // 5 min cap
+// ===== Max gap between WiFi / MQTT reconnect attempts =====
+// The backoff doubles (5s, 10s, 20s, ...) but is capped here. This device is
+// mains-powered, not battery, so there is no power reason to back off for
+// minutes — keep retrying often so it rejoins WiFi/broker quickly.
+#define MAX_BACKOFF_MS          60000UL // 1 min cap
 
 // ====================================================================
 // ===================== 4. AUTOMATION SETTINGS =======================
@@ -93,7 +102,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.1"
+#define FW_VERSION              "1.0.9"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

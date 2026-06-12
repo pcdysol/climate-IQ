@@ -131,7 +131,7 @@ namespace SensorManager
 
         // 2. Initialize LD2412 Radar — RX=17, TX=16 @ 115200 (confirmed)
         sensorSerial.setRxBufferSize(512);
-        sensorSerial.begin(115200, SERIAL_8N1, 17, 16);
+        sensorSerial.begin(115200, SERIAL_8N1, 16, 17);
 
         // Drain startup noise
         unsigned long settleStart = millis();
@@ -551,10 +551,26 @@ namespace SensorManager
                 ESP_LOGI(TAG, "Manual remote press detected: %s 0x%lX",
                          press.proto, (unsigned long)press.value);
 
-                SystemEvent ev;
-                ev.type = EVENT_MANUAL_OVERRIDE;
-                ev.payload = 0;
-                xQueueSend(automationQueue, &ev, 0);
+                // Revert ONLY when it's our AC's protocol and the user actually moved
+                // power or temperature away from the schedule. Power and temp are
+                // independent; temp is compared to the NORMAL setpoint, never eco.
+                // Swing/fan/mode presses (power+temp unchanged) are respected — no
+                // command is sent, so the user's adjustment sticks.
+                if (press.isOurAc)
+                {
+                    AutoState st     = globalState->acAutoState.load();
+                    bool intendedPwr = (st != AUTO_OFF);
+                    bool powerChanged = (press.power != intendedPwr);
+                    bool tempChanged  = (press.power &&
+                                         press.temp != globalState->currentNormalTemp);
+                    if (powerChanged || tempChanged)
+                    {
+                        SystemEvent ev;
+                        ev.type = EVENT_MANUAL_OVERRIDE;
+                        ev.payload = 0;
+                        xQueueSend(automationQueue, &ev, 0);
+                    }
+                }
             }
 
             // One-time: read the radar's stored range for the dashboard AFTER

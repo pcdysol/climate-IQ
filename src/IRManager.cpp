@@ -100,6 +100,22 @@ bool pollRemoteListener(RemotePress &out) {
     strncpy(out.proto, p.c_str(), sizeof(out.proto) - 1);
     out.proto[sizeof(out.proto) - 1] = '\0';
     out.value = (uint32_t)(results.value & 0xFFFFFFFFULL);
+
+    // Classify the press: only OUR AC's protocol lets us read power/temp and tell a
+    // real change apart from swing/fan/mode. Compare by decode_type (robust against
+    // the "(Repeat)" suffix typeToString can add to the name string).
+    out.isOurAc = false;
+    out.power   = false;
+    out.temp    = 0;
+    String saved = preferences.getString("protocol_name", "");
+    if (saved.length() && strToDecodeType(saved.c_str()) == results.decode_type) {
+        stdAc::state_t st;
+        if (IRAcUtils::decodeToState(&results, &st)) {
+            out.isOurAc = true;
+            out.power   = st.power;
+            out.temp    = (int)lround(st.degrees);
+        }
+    }
     return true;
 }
 
@@ -158,7 +174,6 @@ void sendACFallback(bool turnOn, int targetTemp) {
 
     if (protocol == decode_type_t::UNKNOWN) {
         ESP_LOGW(TAG, "No valid protocol saved. Falling back to ELECTRA_AC.");
-        protocol = decode_type_t::ELECTRA_AC;
     }
 
     ac.next.protocol = protocol;

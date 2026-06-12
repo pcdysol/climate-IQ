@@ -11,7 +11,7 @@
  * An offline failsafe forces radar control when no network time is available.
  */
 #include <Arduino.h>
-#include "config.h"
+#include "Config.h"
 #include "SharedState.h"
 #include "Preferences.h"
 #include "ScheduleManager.h"
@@ -208,9 +208,15 @@ namespace ScheduleManager
                 break;
             }
         }
-        if (digitsOnly && irHex.length() <= 4)
+        // A dashboard command is a small integer 1-17 (1=ON, 2=OFF, 3-17=temp).
+        // The backend zero-pads it INCONSISTENTLY ("0011" but also "00013"), so we
+        // must classify by VALUE, not string length — the same way CommandProcessor
+        // reads it via doc["ir"].as<int>(). A genuine raw IR code (long, and usually
+        // containing hex letters a-f) fails the isDigit scan above or the 1-17 range
+        // check below, so it still drops correctly to the raw-hex path that follows.
+        if (digitsOnly)
         {
-            int cmdNum = irHex.toInt();
+            int cmdNum = irHex.toInt(); // "00013" -> 13, "0011" -> 11
             if (cmdNum >= 1 && cmdNum <= 17)
             {
                 if (cmdNum == 1)
@@ -440,51 +446,108 @@ namespace ScheduleManager
 
             if (insideSeg)
             {
+                // Capture the setpoint currently applied BEFORE the segment overwrites it,
+                // so both branches below can tell whether the temperature actually changed.
+                int prevTemp = sysData.currentNormalTemp;
+
                 applySegmentParams(seg);
                 applySegmentRadar(seg.radar);
                 sysData.currentNormalTemp = seg.temp;
                 preferences.putInt("normal_temp", seg.temp);
 
-                if (sysData.acAutoState == AUTO_ON_ECO)
-                {
-                    // Radar already drove AC to eco — silently update settings, let radar continue managing.
-                    // (Only AUTO_ON_ECO is "managed by radar"; AUTO_OFF after a delete must be re-entered.)
-                    ESP_LOGI(TAG, "Schedule updated while in eco mode. Settings applied, no IR sent.");
-                }
-                else
-                {
-                    // AUTO_OFF (e.g. after a delete) or AUTO_ON_NORMAL: enter/re-assert segment normally.
-                    // Stop any stale eco/off timers — when AC is turning ON, no countdown should be running.
-                    // These will be re-started below ONLY if the room is genuinely empty.
-                    xTimerStop(ecoTimer, 0);
-                    xTimerStop(offTimer, 0);
+                // Decide by OCCUPANCY, not by the prior AC state. The schedule defines
+                // the baseline ("inside a segment => AC should be ON at seg.temp"), but
+                // radar's energy saving overrides that baseline: if radar is managing and
+                // the room is empty we must NOT blast the AC on into an empty room —
+                // preserve whatever eco/off state radar already chose. Radar turns the AC
+                // on at the new seg.temp the instant someone enters.
+                //
+                // This is what makes AUTO_OFF and AUTO_ON_ECO symmetric: previously eco
+                // was preserved but a radar-driven OFF got turned back on. Now both
+                // radar-managed empty-room states are left alone.
+                //
+                // Note: while a flap delay is active cachedPresence is forced false, but a
+                // flap delay only ever follows an OFF (state is AUTO_OFF), so it lands in
+                // the "already off, leave it off" case below — exactly what we want.
+                bool radarManagingEmpty = sysData.radarAutoMode && !sysData.cachedPresence;
 
-                    if (!sendScheduleIR(wday, seg.temp))
+                if (radarManagingEmpty)
+                {
+                    // Preserve the radar-chosen state for the empty room; no IR sent.
+                    AutoState st = sysData.acAutoState.load();
+                    if (st == AUTO_ON_ECO)
                     {
-                        AutomationManager::executeACCommand(true, seg.temp, "schedule_update");
+                        // Eco already running; (re)arm the off countdown with the (possibly
+                        // updated) TOffTime so it eventually powers down.
+                        if (sysData.TOffTime > 0)
+                            xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
+                        ESP_LOGI(TAG, "Schedule update: radar managing empty room (eco). Settings applied, no IR.");
                     }
-                    else
+                    else if (st == AUTO_ON_NORMAL)
                     {
-                        xTimerReset(enforceTimer, 0);
-                        Indicator::indicateIRSent();
-                        char detail[32];
-                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
-                        NetworkManager::publishACK("schedule_update", detail);
-                        sysData.lastCommandTime = millis();
-                    }
-                    sysData.acAutoState = AUTO_ON_NORMAL;
-
-                    // Start eco/off timers ONLY if room is genuinely empty.
-                    // If flap delay is active (e.g. delete just ran), cachedPresence is artificially
-                    // forced to false and we cannot trust it. SensorManager will fire a presence event
-                    // when the flap delay expires, which will start timers correctly if needed.
-                    if (sysData.radarAutoMode && !sysData.cachedPresence && !sysData.isFlapDelayActive)
-                    {
+                        // AC is already running and cooling the (empty) room. A temperature
+                        // change should retune the unit NOW: raising the setpoint on an
+                        // already-on AC isn't "cooling an empty room" (the guard's concern) —
+                        // it only saves energy — so unlike the OFF/ECO cases we DO send here.
+                        // If the temp is unchanged we still send nothing, exactly as before.
+                        if (prevTemp != seg.temp)
+                        {
+                            AutomationManager::executeACCommand(true, seg.temp, "schedule_retune");
+                            ESP_LOGI(TAG, "Schedule update: AC on, room empty — retuned %d°C -> %d°C.",
+                                     prevTemp, seg.temp);
+                        }
+                        // Room is empty: (re)arm the eco/off countdown so it still powers down.
                         if (sysData.TEcoTime > 0)
                             xTimerChangePeriod(ecoTimer, pdMS_TO_TICKS(sysData.TEcoTime), 0);
                         if (sysData.TOffTime > 0)
                             xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
                     }
+                    else
+                    {
+                        // AUTO_OFF: radar already powered the AC off for the empty room.
+                        // Leave it off (the fix) — do NOT turn it back on.
+                        ESP_LOGI(TAG, "Schedule update: radar managing empty room (off). Settings applied, no IR.");
+                    }
+                }
+                else
+                {
+                    // Room occupied, or radar disabled: assert the schedule's baseline ON
+                    // state at the new setpoint. No countdown should run while turning on,
+                    // and we don't need to re-arm any (occupied => no countdown; radar off
+                    // => radar isn't driving eco/off at all).
+                    xTimerStop(ecoTimer, 0);
+                    xTimerStop(offTimer, 0);
+
+                    // Only (re)send IR when the resulting state isn't already in effect:
+                    // a temperature change, or the AC not already running at normal. Saving a
+                    // schedule whose setpoint didn't change skips the redundant blast (no AC
+                    // beep / flap twitch); the 3-min enforce timer still re-asserts regardless.
+                    if (sysData.acAutoState != AUTO_ON_NORMAL || prevTemp != seg.temp)
+                    {
+                        if (!sendScheduleIR(wday, seg.temp))
+                        {
+                            AutomationManager::executeACCommand(true, seg.temp, "schedule_update");
+                        }
+                        else
+                        {
+                            xTimerReset(enforceTimer, 0);
+                            Indicator::indicateIRSent();
+                            char detail[32];
+                            snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+                            NetworkManager::publishACK("schedule_update", detail);
+                            sysData.lastCommandTime = millis();
+                        }
+                    }
+                    else
+                    {
+                        // Already ON at this exact setpoint: skip the IR but still confirm the
+                        // resulting state to the backend so observability is unchanged.
+                        char detail[32];
+                        snprintf(detail, sizeof(detail), "state=ON,temp=%d", seg.temp);
+                        NetworkManager::publishACK("schedule_update", detail);
+                        ESP_LOGI(TAG, "Schedule update: already ON at %d°C — no IR resent.", seg.temp);
+                    }
+                    sysData.acAutoState = AUTO_ON_NORMAL;
                 }
             }
             else
@@ -504,6 +567,11 @@ namespace ScheduleManager
             // Sync task memory so it doesn't re-process this same minute
             lastScheduledMin = currentMin;
             lastScheduledWday = wday;
+
+            // This update authoritatively set today's AC state, which also means the
+            // schedule task's boot run (gated on lastScheduledMin == -1) will now be
+            // skipped — so open the radar gate here, or it would stay shut forever.
+            sysData.scheduleBootDone = true;
         }
 
         ESP_LOGI(TAG, "%d segment(s) saved for %s (wday=%d)", count, day, wday);
@@ -517,8 +585,9 @@ namespace ScheduleManager
      *
      * While the clock is invalid (NTP/GSM not yet synced) it waits, and after 60s
      * offline it engages the failsafe — forcing radar control so the room is still
-     * automated locally (magenta LED). Once time is valid it sleeps precisely until
-     * the next :00 second, then evaluates the current minute:
+     * automated locally (magenta LED). Once time is valid it polls every second and
+     * evaluates the current minute, acting at most once per minute via the dedup
+     * guard (so a clock correction is reacted to within ~1s, not up to a minute):
      *   - Boot run (first evaluation): catch the AC up to where the schedule says it
      *     should be, while respecting any decision radar already made during boot.
      *   - Steady state: act only on real segment transitions (enter/leave/change).
@@ -538,22 +607,48 @@ namespace ScheduleManager
             // 1. Time validity check: If epoch is before 2021, NTP hasn't synced.
             if (tv.tv_sec < 1609459200)
             {
+                // A missing clock does NOT mean we are offline. The broker can be
+                // connected and telemetry flowing while NTP is merely slow/blocked
+                // (common on captive or filtered networks). SYS_WIFI_OK / SYS_GSM_OK
+                // mean MQTT is actually connected, so use that — not the clock — to
+                // decide whether we are truly isolated.
+                bool brokerConnected = (sysData.currentState == SYS_WIFI_OK ||
+                                        sysData.currentState == SYS_GSM_OK);
+
+                if (brokerConnected)
+                {
+                    // Online, just waiting for time: do NOT engage the failsafe (the
+                    // backend is in control). Keep the 60s grace window fresh so a
+                    // LATER real disconnect starts counting from zero, and clear any
+                    // failsafe left over from a previous offline spell.
+                    offlineBootStart = millis();
+                    offlineFailsafeTriggered = false;
+                    sysData.isOfflineFailsafeActive = false;
+                }
                 // --- ROBUST OFFLINE FAILSAFE ---
-                // If 60 seconds have passed and we still have no network time,
-                // prioritize local automation and force the radar to take over.
-                if (!offlineFailsafeTriggered && (millis() - offlineBootStart > 60000))
+                // Only when genuinely offline (broker unreachable) for 60s: prioritize
+                // local automation and force the radar to take over.
+                else if (!offlineFailsafeTriggered && (millis() - offlineBootStart > 60000))
                 {
                     ESP_LOGW(TAG, "Offline timeout! Prioritizing local automation. Forcing radar ON.");
                     sysData.radarAutoMode = true;
                     offlineFailsafeTriggered = true;
                     sysData.isOfflineFailsafeActive = true; // <--- ADD THIS: Turn on Magenta
 
-                    // Push an event to the queue immediately.
-                    // This ensures the AC turns on if you are already standing in the room!
-                    SystemEvent event;
-                    event.type = EVENT_PRESENCE_CHANGED;
-                    event.payload = sysData.cachedPresence ? 1 : 0;
-                    xQueueSend(automationQueue, &event, 0);
+                    // Kick the AC on for an already-present occupant — but ONLY when no
+                    // schedule exists. "Schedule is king": if a schedule is configured it
+                    // must make the first AC decision once the clock syncs, so we must not
+                    // pre-empt it with a radar command at boot. (Radar still takes over on a
+                    // genuine enter/re-enter transition via poll(), since the failsafe leaves
+                    // radarAutoMode + isOfflineFailsafeActive on.) Without a schedule there is
+                    // nothing to defer to, so cool the room immediately as before.
+                    if (!sysData.hasAnySchedule)
+                    {
+                        SystemEvent event;
+                        event.type = EVENT_PRESENCE_CHANGED;
+                        event.payload = sysData.cachedPresence ? 1 : 0;
+                        xQueueSend(automationQueue, &event, 0);
+                    }
                 }
 
                 vTaskDelay(pdMS_TO_TICKS(5000));
@@ -565,15 +660,17 @@ namespace ScheduleManager
 
             sysData.isOfflineFailsafeActive = false; // <--- ADD THIS: Turn off Magenta
 
-            // 2. Calculate EXACT milliseconds until the top of the next minute (00 seconds)
-            int current_sec = tv.tv_sec % 60;
-            int current_ms = tv.tv_usec / 1000;
-            uint32_t ms_to_next_minute = 60000 - ((current_sec * 1000) + current_ms);
+            // 2. Fixed 1-second poll. We deliberately do NOT sleep all the way to the
+            // next :00 boundary: a clock correction (NTP/GSM resync, which this device
+            // does routinely) landing mid-sleep would otherwise go unnoticed for up to
+            // a full minute. Polling every second reacts to any clock step within ~1s
+            // and lets the schedule make its first boot decision promptly. The cost is
+            // negligible — see the dedup early-out below: ~98% of ticks do nothing but
+            // read the clock and return, and the NVS-backed findSegment() reads still
+            // run only on a genuine minute change (~once/min), exactly as before.
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
-            // 3. Sleep dynamically. CPU uses 0% power here.
-            vTaskDelay(pdMS_TO_TICKS(ms_to_next_minute));
-
-            // --- WAKING UP: It is now exactly XX:XX:00 ---
+            // --- Evaluate the current minute (acted on at most once, see dedup) ---
 
             struct tm timeinfo;
             if (!getLocalTime(&timeinfo, 0))
@@ -582,6 +679,10 @@ namespace ScheduleManager
             int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
             int currentWday = timeinfo.tm_wday;
 
+            // CRITICAL (do not remove): with the 1s poll above this is what makes the
+            // schedule act at most ONCE per minute. Without it, every tick inside the
+            // same minute would re-fire the transition logic (and IR). Skip if we have
+            // already processed this exact minute.
             bool isBootRun = (lastScheduledMin == -1 || lastScheduledWday == -1);
             if (!isBootRun && currentMin == lastScheduledMin && currentWday == lastScheduledWday)
                 continue;
@@ -600,46 +701,55 @@ namespace ScheduleManager
                 {
                     sysData.isInsideSchedule = false;
 
-                    // --- FAILSAFE RECOVERY SHUTDOWN ---
-                    // If the failsafe was running, but today has no schedules at all,
-                    // we must explicitly kill the radar and turn the AC off.
+                    // No schedule for today => the AC must be OFF. Send the OFF
+                    // command UNCONDITIONALLY (same as the in-schedule "gap" case
+                    // below), so a unit left physically on is corrected at boot
+                    // regardless of whether radar automation is enabled.
+                    if (!IRManager::playCustomButton("ir_off"))
+                        IRManager::sendACFallback(false, 24);
+                    sysData.acAutoState = AUTO_OFF;
+                    Indicator::indicateIRSent();
+
+                    // FAILSAFE RECOVERY: if the offline failsafe had forced radar
+                    // on, undo it now that we know today has no schedule.
                     if (sysData.radarAutoMode)
                     {
                         sysData.radarAutoMode = false;
                         preferences.putBool("radar_auto", false);
                         ESP_LOGI(TAG, "Recovery: No schedules for today. Radar disabled.");
-
-                        if (!IRManager::playCustomButton("ir_off"))
-                            IRManager::sendACFallback(false, 24);
-
-                        sysData.acAutoState = AUTO_OFF;
-                        Indicator::indicateIRSent();
                     }
-                    // ----------------------------------
 
+                    ESP_LOGI(TAG, "Boot %02d:%02d — no schedule today, AC OFF",
+                             timeinfo.tm_hour, timeinfo.tm_min);
+                    sysData.scheduleBootDone = true; // schedule has spoken: radar may take over
                     continue;
                 }
                 ScheduleSegment seg;
                 if (findSegment(currentWday, currentMin, seg))
                 {
+                    // Capture the setpoint radar may have already used (the NVS value)
+                    // BEFORE the segment overwrites it, so we can tell whether a radar
+                    // boot command already left the AC at the temperature we now want.
+                    int prevNormalTemp = sysData.currentNormalTemp;
+
                     sysData.isInsideSchedule = true;
                     applySegmentParams(seg);
                     applySegmentRadar(seg.radar);
                     sysData.currentNormalTemp = seg.temp;
                     preferences.putInt("normal_temp", seg.temp);
 
-                    // Check if radar already made an AC decision during the offline wait.
-                    // AUTO_ON_ECO is only ever set by radar — schedule always enters at NORMAL.
-                    // AUTO_OFF with lastCommandTime > 0 means radar drove the AC off (not boot default).
+                    // Did radar already drive the AC during the offline boot wait? At boot the
+                    // only other actor is radar, so lastCommandTime > 0 means radar already sent
+                    // something. AUTO_ON_ECO is only ever set by radar; AUTO_OFF means radar drove
+                    // the AC off; AUTO_ON_NORMAL means radar turned it on for an occupant — all
+                    // before the schedule's first evaluation got a chance to run.
                     AutoState curState = sysData.acAutoState.load();
-                    bool radarDroveOff = sysData.radarAutoMode &&
-                                         (curState == AUTO_ON_ECO ||
-                                          (curState == AUTO_OFF && sysData.lastCommandTime > 0));
+                    bool radarManaged = sysData.radarAutoMode && sysData.lastCommandTime > 0;
 
-                    if (radarDroveOff)
+                    if (radarManaged && (curState == AUTO_ON_ECO || curState == AUTO_OFF))
                     {
-                        // Radar is managing. Apply schedule settings silently so the correct
-                        // temp/eco/off values are ready when the room becomes occupied again.
+                        // Radar drove the AC to eco/off. Apply schedule settings silently so the
+                        // correct temp/eco/off values are ready when the room is occupied again.
                         // Re-arm offTimer only if currently in eco (eco already fired, off hasn't).
                         if (curState == AUTO_ON_ECO && sysData.TOffTime > 0)
                             xTimerChangePeriod(offTimer, pdMS_TO_TICKS(sysData.TOffTime), 0);
@@ -647,6 +757,24 @@ namespace ScheduleManager
                         ESP_LOGI(TAG, "Boot %02d:%02d — radar managed (%s), schedule params applied, no IR",
                                  timeinfo.tm_hour, timeinfo.tm_min,
                                  curState == AUTO_ON_ECO ? "eco" : "off");
+                    }
+                    else if (radarManaged && curState == AUTO_ON_NORMAL)
+                    {
+                        // Radar already turned the AC ON for an occupant during the boot wait.
+                        // Only re-blast if the scheduled temp differs from what radar used —
+                        // otherwise the AC is already in the correct state, so skip the IR and
+                        // avoid the duplicate boot command (radar_presence + boot_schedule_on).
+                        if (prevNormalTemp != seg.temp)
+                        {
+                            AutomationManager::executeACCommand(true, seg.temp, "boot_schedule_retune");
+                            ESP_LOGI(TAG, "Boot %02d:%02d — radar had AC ON, retuned %d°C -> %d°C",
+                                     timeinfo.tm_hour, timeinfo.tm_min, prevNormalTemp, seg.temp);
+                        }
+                        else
+                        {
+                            ESP_LOGI(TAG, "Boot %02d:%02d — radar already turned AC ON at %d°C, no IR",
+                                     timeinfo.tm_hour, timeinfo.tm_min, seg.temp);
+                        }
                     }
                     else
                     {
@@ -695,6 +823,10 @@ namespace ScheduleManager
                     ESP_LOGI(TAG, "Boot %02d:%02d — outside segments, AC OFF",
                              timeinfo.tm_hour, timeinfo.tm_min);
                 }
+
+                // Schedule has now made its first authoritative decision for this boot —
+                // radar may take over from here ("schedule is king").
+                sysData.scheduleBootDone = true;
                 continue;
             }
 

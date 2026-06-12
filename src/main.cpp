@@ -14,7 +14,7 @@
  * in SharedState.h (sysData, automationQueue, the timers, irMutex, etc.).
  */
 #include <Arduino.h>
-#include "config.h"
+#include "Config.h"
 #include "SharedState.h"
 #include "Indicator.h"
 #include "IRManager.h"

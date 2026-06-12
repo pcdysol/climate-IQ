@@ -12,7 +12,7 @@
  * @note Shares UART pins with the radar — only one of GSM / radar can be active.
  */
 #include "GSMManager.h"
-#include "config.h"
+#include "Config.h"
 #include "CommandProcessor.h"
 #include "HealthManager.h"
 #include "NetworkManager.h"

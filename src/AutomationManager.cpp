@@ -108,6 +108,16 @@ namespace AutomationManager
      */
     static void enforceCurrentState(bool clockValid)
     {
+        // Don't enforce (send any IR) until the system has made its first boot
+        // decision — either the schedule's boot evaluation ran (scheduleBootDone)
+        // or the offline failsafe engaged radar control (isOfflineFailsafeActive).
+        // Before that the AC state is just the power-on default (AUTO_OFF), so
+        // enforcing it would blast a spurious OFF while we are still waiting for
+        // WiFi / time sync. Once the decision is made, enforce resumes its normal
+        // 3-minute re-assertion.
+        if (!sysData.scheduleBootDone.load() && !sysData.isOfflineFailsafeActive)
+            return;
+
         // Outside schedule hours (and time is known): force OFF.
         if (clockValid && sysData.hasAnySchedule && !sysData.isInsideSchedule)
         {
@@ -172,11 +182,18 @@ namespace AutomationManager
                         }
                     }
                 }
+
+                // "Schedule is king": radar must not drive the AC until the schedule has
+                // made its first authoritative decision this boot. The sole exception is
+                // the offline failsafe, which deliberately hands control to radar when
+                // there is no network time for the schedule to act on.
+                bool radarReady = sysData.scheduleBootDone.load() || sysData.isOfflineFailsafeActive;
+
                 switch (incomingEvent.type)
                 {
                 case EVENT_PRESENCE_CHANGED:
                     // Only process presence if radar automation is actually enabled
-                    if (!sysData.radarAutoMode || blockRadar)
+                    if (!sysData.radarAutoMode || blockRadar || !radarReady)
                         break;
                     if (incomingEvent.payload == 1)
                     {
@@ -210,7 +227,7 @@ namespace AutomationManager
 
                 // --- THE ALARMS RING! ---
                 case EVENT_ECO_TRIGGER:
-                    if (!sysData.radarAutoMode || blockRadar)
+                    if (!sysData.radarAutoMode || blockRadar || !radarReady)
                         break;
                     // Only trigger Eco if the AC is currently running normally
                     if (sysData.acAutoState == AUTO_ON_NORMAL)
@@ -222,7 +239,7 @@ namespace AutomationManager
                     break;
 
                 case EVENT_OFF_TRIGGER:
-                    if (!sysData.radarAutoMode || blockRadar)
+                    if (!sysData.radarAutoMode || blockRadar || !radarReady)
                         break;
                     // Turn it off
                     if (sysData.acAutoState != AUTO_OFF)

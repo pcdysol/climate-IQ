@@ -27,4 +27,8 @@ namespace ScheduleManager {
     uint8_t loadSegmentCount(int wday);
     /// Load segment @p idx for @p wday into @p out. @return true if it exists.
     bool loadSegment(int wday, int idx, ScheduleSegment &out);
+
+    /// @return the active segment's radar field (1 enable, 2 disable) for the current
+    ///         local time, or -1 if outside all segments / no synced clock.
+    int currentSegmentRadar();
 }

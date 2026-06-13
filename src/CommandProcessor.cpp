@@ -111,12 +111,42 @@ namespace CommandProcessor {
             isValidCommand = true;
         }
         // =========================================================
+        // 2b. ENFORCEMENT CONTROL (periodic 3-min AC re-assertion on/off)
+        // =========================================================
+        // Disables only the periodic enforce timer's re-assertion. The immediate
+        // manual-override revert (foreign remote press -> re-assert schedule) is a
+        // separate path and is intentionally NOT affected by this toggle.
+        else if (cmd == "enforcement_control") {
+            bool en = doc["enforcement_enabled"] | true;
+            sysData.enforcementEnabled = en;
+            preferences.putBool("enforce_en", en);
+            ESP_LOGI(TAG, "Enforcement procedure: %s", en ? "ENABLED" : "DISABLED");
+            NetworkManager::publishACK("enforcement", en ? "enabled" : "disabled");
+            isValidCommand = true;
+        }
+        // =========================================================
+        // 2c. REMOTE IR CONTROL (always-on AC remote listener on/off)
+        // =========================================================
+        else if (cmd == "remote_ir_control") {
+            bool en = doc["remote_ir_enabled"] | true;
+            sysData.remoteIrEnabled = en;
+            preferences.putBool("remote_ir_en", en);
+            ESP_LOGI(TAG, "Remote IR listener: %s", en ? "ENABLED" : "DISABLED");
+            NetworkManager::publishACK("remote_ir", en ? "enabled" : "disabled");
+            isValidCommand = true;
+        }
+        // =========================================================
         // 3. RADAR CONTROL
         // =========================================================
         else if (cmd == "radar_control") {
             String radarStr = doc["radar"].as<String>();
             ESP_LOGI(TAG, "Received Radar Value: %s", radarStr.c_str());
             const char *detail = "unchanged";
+            // A manual radar command normally pins radarManualOverride so the schedule
+            // won't flip radar back. The exception is a disable that we revert during
+            // scheduled hours (below): there we CLEAR the override so the schedule keeps
+            // governing radar.
+            bool pinOverride = true;
 
             if (radarStr == "0100" || radarStr == "256") {
                 if (!sysData.radarAutoMode) {
@@ -128,19 +158,39 @@ namespace CommandProcessor {
                 }
                 detail = "enabled";
             } else if (radarStr == "0200" || radarStr == "512") {
-                if (sysData.radarAutoMode) {
-                    sysData.radarAutoMode = false;
-                    preferences.putBool("radar_auto", false);
-                    ESP_LOGI(TAG, "Radar Automation: DISABLED");
+                // "Schedule is king": inside scheduled hours radar follows the schedule.
+                // Revert a manual disable unless the active segment itself disables radar.
+                int segRadar = ScheduleManager::currentSegmentRadar();
+                if (segRadar >= 0 && segRadar != 2) {
+                    if (!sysData.radarAutoMode) {
+                        sysData.radarAutoMode = true;
+                        preferences.putBool("radar_auto", true);
+                        sysData.lastPresenceTime = millis();
+                    }
+                    // Clear any pinned override so the schedule keeps governing radar.
+                    sysData.radarManualOverride = false;
+                    preferences.putBool("rad_ovr", false);
+                    pinOverride = false;
+                    detail = "reverted_schedule_on";
+                    ESP_LOGI(TAG, "Radar disable reverted — inside schedule hours, radar kept ON.");
                     Indicator::indicateSuccess();
+                } else {
+                    if (sysData.radarAutoMode) {
+                        sysData.radarAutoMode = false;
+                        preferences.putBool("radar_auto", false);
+                        ESP_LOGI(TAG, "Radar Automation: DISABLED");
+                        Indicator::indicateSuccess();
+                    }
+                    detail = "disabled";
                 }
-                detail = "disabled";
             }
-            
-            sysData.radarManualOverride = true;
-            sysData.radarManualValue = sysData.radarAutoMode;
-            preferences.putBool("rad_ovr", true);
-            preferences.putBool("rad_ovr_v", sysData.radarAutoMode);
+
+            if (pinOverride) {
+                sysData.radarManualOverride = true;
+                sysData.radarManualValue = sysData.radarAutoMode;
+                preferences.putBool("rad_ovr", true);
+                preferences.putBool("rad_ovr_v", sysData.radarAutoMode);
+            }
             NetworkManager::publishACK("radar", detail);
             isValidCommand = true;
         }

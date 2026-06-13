@@ -102,7 +102,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.9"
+#define FW_VERSION              "1.0.11"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

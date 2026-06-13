@@ -19,6 +19,7 @@
 #include "WebDashboard.h"
 #include "AutomationManager.h"
 #include "IRManager.h"
+#include "NetworkManager.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 
@@ -537,38 +538,77 @@ namespace SensorManager
             // Catch any USER press on the AC/phone IR remote. A genuine foreign
             // frame is logged for the dashboard and triggers an immediate enforce
             // so the schedule/automation re-asserts the correct AC state.
+            // pollRemoteListener() is always called so it keeps draining the IR ring
+            // buffer (and its debounce state stays fresh); when the backend has
+            // disabled the listener via remote_ir_control we simply ignore the press
+            // — nothing is logged and no override event is queued.
             IRManager::RemotePress press;
             if (IRManager::pollRemoteListener(press))
             {
-                uint8_t idx = globalState->remoteLogHead;
-                globalState->remoteLog[idx].atMillis = millis();
-                snprintf(globalState->remoteLog[idx].text,
-                         sizeof(globalState->remoteLog[idx].text),
-                         "%s 0x%lX", press.proto, (unsigned long)press.value);
-                globalState->remoteLogHead = (idx + 1) % REMOTE_LOG_SIZE;
-                globalState->remoteOverrideCount.fetch_add(1, std::memory_order_relaxed);
-
-                ESP_LOGI(TAG, "Manual remote press detected: %s 0x%lX",
-                         press.proto, (unsigned long)press.value);
-
-                // Revert ONLY when it's our AC's protocol and the user actually moved
-                // power or temperature away from the schedule. Power and temp are
-                // independent; temp is compared to the NORMAL setpoint, never eco.
-                // Swing/fan/mode presses (power+temp unchanged) are respected — no
-                // command is sent, so the user's adjustment sticks.
-                if (press.isOurAc)
+                if (globalState->remoteIrEnabled.load())
                 {
-                    AutoState st     = globalState->acAutoState.load();
-                    bool intendedPwr = (st != AUTO_OFF);
-                    bool powerChanged = (press.power != intendedPwr);
+                    uint8_t idx = globalState->remoteLogHead;
+                    globalState->remoteLog[idx].atMillis = millis();
+                    snprintf(globalState->remoteLog[idx].text,
+                             sizeof(globalState->remoteLog[idx].text),
+                             "%s 0x%lX", press.proto, (unsigned long)press.value);
+                    globalState->remoteLogHead = (idx + 1) % REMOTE_LOG_SIZE;
+                    globalState->remoteOverrideCount.fetch_add(1, std::memory_order_relaxed);
+
+                    ESP_LOGI(TAG, "Manual remote press detected: %s 0x%lX",
+                             press.proto, (unsigned long)press.value);
+
+                    // Revert ONLY when it's our AC's protocol and the user actually moved
+                    // power or temperature away from the schedule. Power and temp are
+                    // independent; temp is compared to the NORMAL setpoint, never eco.
+                    // Swing/fan/mode presses (power+temp unchanged) are respected — no
+                    // command is sent, so the user's adjustment sticks.
+                    if (press.isOurAc)
+                    {
+                        AutoState st     = globalState->acAutoState.load();
+                        bool intendedPwr = (st != AUTO_OFF);
+                        bool powerChanged = (press.power != intendedPwr);
+                        bool tempChanged  = (press.power &&
+                                             press.temp != globalState->currentNormalTemp);
+                        if (powerChanged || tempChanged)
+                        {
+                            SystemEvent ev;
+                            ev.type = EVENT_MANUAL_OVERRIDE;
+                            ev.payload = 0;
+                            xQueueSend(automationQueue, &ev, 0);
+                        }
+                    }
+                }
+                else if (!globalState->enforcementEnabled.load() && press.isOurAc)
+                {
+                    // BOTH OFF (remote_ir + enforcement): the device no longer reverts
+                    // manual changes, so we REPORT them to the cloud instead — while
+                    // treating the schedule's state as READ ONLY. We never write
+                    // currentNormalTemp / acAutoState here. A separate dedup baseline
+                    // (manualRpt*) suppresses the AC-state re-sends that fan/mode frames
+                    // repeat; it is re-armed by executeACCommand() on any device command.
+                    AutoState st      = globalState->acAutoState.load();
+                    bool intendedOn   = (st != AUTO_OFF);
+                    bool powerChanged = (press.power != intendedOn);
                     bool tempChanged  = (press.power &&
                                          press.temp != globalState->currentNormalTemp);
-                    if (powerChanged || tempChanged)
+
+                    int lastP = globalState->manualRptPower.load();
+                    int lastT = globalState->manualRptTemp.load();
+                    bool dupe = (lastP == (int)press.power) &&
+                                (!press.power || lastT == press.temp);
+
+                    if ((powerChanged || tempChanged) && !dupe)
                     {
-                        SystemEvent ev;
-                        ev.type = EVENT_MANUAL_OVERRIDE;
-                        ev.payload = 0;
-                        xQueueSend(automationQueue, &ev, 0);
+                        char detail[40];
+                        snprintf(detail, sizeof(detail), "state=%s,temp=%d",
+                                 press.power ? "ON" : "OFF", press.power ? press.temp : 0);
+                        NetworkManager::publishACK("manual_remote_change", detail);
+                        ESP_LOGI(TAG, "Manual remote change reported (schedule untouched): %s", detail);
+
+                        // Update the dedup baseline ONLY — never the schedule's setpoint.
+                        globalState->manualRptPower = (int)press.power;
+                        globalState->manualRptTemp  = press.power ? press.temp : -1;
                     }
                 }
             }

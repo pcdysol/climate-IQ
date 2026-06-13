@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ClimateIQ Firmware — Structure &amp; Commands</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  @page { size: A4 landscape; margin: 11mm 12mm; }
+  :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --accent:#2563eb; --new:#d97706; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); }
+  .page { page-break-after: always; height: 188mm; display: flex; flex-direction: column; }
+  .page:last-child { page-break-after: auto; }
+  h1 { font-size: 26px; margin: 0 0 2px; }
+  h2 { font-size: 20px; margin: 0 0 8px; padding-bottom: 5px; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 14px; margin: 14px 0 5px; color: var(--accent); }
+  p, li { font-size: 13px; line-height: 1.5; color: #1e293b; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  /* make every diagram fill the page area without distortion */
+  .diagram { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .diagram .mermaid { width: 100%; text-align: center; }
+  .diagram .mermaid svg { width: auto !important; height: auto !important;
+                          max-width: 100% !important; max-height: 165mm !important; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px;
+         background: #f1f5f9; padding: 1px 5px; border-radius: 4px; }
+  .tag-new { color:#fff; background:var(--new); border-radius:4px; padding:1px 6px; font-size:10px; font-weight:700; }
+  .legend { font-size: 12px; color: var(--muted); margin: 6px 0 0; text-align:center; }
+  .note { background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:9px 13px; font-size:12px; margin:12px 0 0; }
+  .grid2 { display:grid; grid-template-columns: 1.05fr 1fr; gap: 22px; align-items:start; }
+</style>
+</head>
+<body>
+
+<!-- PAGE 1 : OVERVIEW + OWNERSHIP -->
+<div class="page">
+  <h1>ClimateIQ Smart AC Controller</h1>
+  <p class="sub">Firmware structure &amp; manual-command reference · FW 1.0.9 · ESP32 / FreeRTOS</p>
+  <h2>1 · Overview — who runs what</h2>
+  <p>The firmware is a set of independent <strong>FreeRTOS tasks</strong>. They never call each other
+  directly — they coordinate through one global <code>sysData</code> struct, an event <strong>queue</strong>,
+  a few <strong>timers</strong>, and <strong>task notifications</strong>. Crucially, <em>every</em> change to
+  the AC is funnelled through one function, <code>executeACCommand()</code>, which sends the IR and ACKs.</p>
+  <div class="grid2">
+    <table>
+      <tr><th>Task</th><th>Responsibility</th></tr>
+      <tr><td><strong>SensorsTask</strong></td><td>Sole owner of the radar UART; presence/distance, HDC temp/humidity, the always-on IR remote listener, the button.</td></tr>
+      <tr><td><strong>AutoTask</strong></td><td>Drains the event queue &amp; runs the AC state machine.</td></tr>
+      <tr><td><strong>SchedTask</strong></td><td>Evaluates the daily schedule each minute; offline failsafe.</td></tr>
+      <tr><td><strong>NetworkTask</strong></td><td>WiFi or GSM + MQTT; publishes telemetry, receives commands.</td></tr>
+      <tr><td><strong>WebTask</strong></td><td>Local AP dashboard: setup, IR learning, radar range/calibration.</td></tr>
+      <tr><td><strong>OTATask</strong></td><td>Idle until an <code>ota_update</code> job arrives; flash + trial rollback.</td></tr>
+      <tr><td><strong>loop()</strong></td><td>Watchdog, status LED, deferred reboot.</td></tr>
+    </table>
+    <div>
+      <h3>The 3 coordination channels</h3>
+      <p><strong>automationQueue</strong> — events (presence change, eco/off/enforce, manual override) wake <em>AutoTask</em>.</p>
+      <p><strong>Timers</strong> — <code>eco</code> &amp; <code>off</code> (room-empty countdowns), <code>enforce</code> (3-min re-assert), <code>health</code> (30s).</p>
+      <p><strong>Task notifications</strong> — WebTask signals SensorsTask for radar calibrate / factory-reset / set-range / recover (it must touch the UART on the owning task).</p>
+      <div class="note"><strong>Your two new toggles</strong> live here: <code>enforcement_control</code> gates the enforce branch in <em>AutoTask</em>; <code>remote_ir_control</code> gates the listener in <em>SensorsTask</em>.</div>
+    </div>
+  </div>
+</div>
+
+<!-- PAGE 2 : ARCHITECTURE DIAGRAM -->
+<div class="page">
+  <h2>2 · Structure — tasks, IPC &amp; data flow</h2>
+  <div class="diagram"><div class="mermaid">
+flowchart LR
+  classDef task fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a;
+  classDef ipc  fill:#fef3c7,stroke:#d97706,color:#0f172a;
+  classDef ext  fill:#e2e8f0,stroke:#64748b,color:#0f172a;
+  classDef sink fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+
+  CLOUD(["MQTT broker /<br/>cloud app"]):::ext
+  NET["NetworkTask<br/>WiFi · GSM · MQTT"]:::task
+  PJ["CommandProcessor<br/>processJSON()"]:::task
+  SENS["SensorsTask<br/>radar · HDC · IR listener"]:::task
+  WEB["WebTask<br/>AP dashboard"]:::task
+  TIMERS(["timers<br/>eco · off · enforce · health"]):::ipc
+  QUEUE(["automationQueue"]):::ipc
+  AUTO["AutoTask<br/>AC state machine"]:::task
+  SCHED["SchedTask<br/>schedule + failsafe"]:::task
+  STATE[("sysData<br/>shared state")]:::ipc
+  AC(["IR &rarr; Air Conditioner"]):::sink
+
+  CLOUD -- commands --> NET --> PJ
+  NET -- telemetry --> CLOUD
+  PJ -- direct AC / settings --> AUTO
+  SENS -- presence change --> QUEUE
+  TIMERS -- eco/off/enforce --> QUEUE
+  QUEUE --> AUTO
+  WEB -- xTaskNotify<br/>cal·reset·range --> SENS
+  AUTO -- executeACCommand --> AC
+  SCHED -- executeACCommand --> AC
+  SCHED -. isInsideSchedule .-> STATE
+  AUTO -. read/write .-> STATE
+  SENS -. read/write .-> STATE
+  </div></div>
+  <p class="legend">Blue = FreeRTOS task · Amber = coordination primitive · Green = AC output · Grey = cloud.</p>
+</div>
+
+<!-- PAGE 3 : MANUAL COMMAND DISPATCH -->
+<div class="page">
+  <h2>3 · Manual commands — message &rarr; action</h2>
+  <div class="diagram"><div class="mermaid">
+flowchart LR
+  classDef ext  fill:#e2e8f0,stroke:#64748b,color:#0f172a;
+  classDef disp fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a;
+  classDef cmd  fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
+  classDef newc fill:#ffedd5,stroke:#d97706,stroke-width:2px,color:#0f172a;
+  classDef act  fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+
+  BROKER(["MQTT broker"]):::ext --> TR{"transport?"}:::disp
+  TR -->|WiFi| WM["onMqttMessage"]:::disp
+  TR -->|GSM| GM["GSM poll"]:::disp
+  WM --> PJ["processJSON(doc)<br/>(device_id NOT checked)"]:::disp
+  GM --> PJ
+
+  PJ --> T1["temperature_control"]:::cmd --> A1["set temp · executeACCommand(ON)<br/>or &rarr; ScheduleManager if 'segments'"]:::act
+  PJ --> T2["power_control"]:::cmd --> A2["executeACCommand(ON/OFF)"]:::act
+  PJ --> T3["enforcement_control"]:::newc --> A3["enforcementEnabled = on/off · NVS"]:::act
+  PJ --> T4["remote_ir_control"]:::newc --> A4["remoteIrEnabled = on/off · NVS"]:::act
+  PJ --> T5["radar_control"]:::cmd --> A5["radarAutoMode + manual override"]:::act
+  PJ --> T6["eco / teco / toff"]:::cmd --> A6["eco temp / delays · NVS"]:::act
+  PJ --> T7["ota_update"]:::cmd --> A7["queue job &rarr; OTATask (async)"]:::act
+  PJ --> T8["protocol (raw IR)"]:::cmd --> A8["send dynamic IR"]:::act
+
+  A1 & A2 & A3 & A4 & A5 & A6 & A7 --> ACK(["publishACK &rarr; broker"]):::ext
+  </div></div>
+  <p class="legend">Amber-bordered boxes (<code>enforcement_control</code>, <code>remote_ir_control</code>) are the two new commands you added.</p>
+</div>
+
+<!-- PAGE 4 : COMMAND REFERENCE TABLE -->
+<div class="page">
+  <h2>4 · Command reference</h2>
+  <table>
+    <tr><th style="width:24%;">Command JSON</th><th>What it does</th><th style="width:20%;">State / NVS key</th></tr>
+    <tr><td><code>temperature_control</code> + <code>temperature_setting</code></td><td>Set the AC setpoint now. Inside a schedule the stored normal temp is left intact (one-shot send). Outside schedule hours it sends, then immediately reverts to OFF.</td><td><code>currentNormalTemp</code> · <code>normal_temp</code></td></tr>
+    <tr><td><code>temperature_control</code> + <code>segments</code></td><td>A <strong>schedule update</strong> for a weekday &rarr; <code>ScheduleManager</code> (validate &rarr; sort &rarr; overlap-check &rarr; persist &rarr; apply if today).</td><td>per-day NVS blob</td></tr>
+    <tr><td><code>power_control</code> + <code>power_status</code></td><td>Turn AC ON (normal temp) or OFF. ON outside scheduled hours reverts to OFF.</td><td><code>acAutoState</code></td></tr>
+    <tr style="background:#fffbeb;"><td><code>enforcement_control</code> + <code>enforcement_enabled</code> <span class="tag-new">NEW</span></td><td>Enable/disable <strong>only the periodic 3-min AC re-assertion</strong>. The manual-remote revert is deliberately <em>not</em> affected.</td><td><code>enforcementEnabled</code> · <code>enforce_en</code></td></tr>
+    <tr style="background:#fffbeb;"><td><code>remote_ir_control</code> + <code>remote_ir_enabled</code> <span class="tag-new">NEW</span></td><td>Enable/disable the always-on AC-remote listener — detection, Remote-Activity logging, and the deviation revert.</td><td><code>remoteIrEnabled</code> · <code>remote_ir_en</code></td></tr>
+    <tr><td><code>radar_control</code> + <code>radar</code></td><td>Enable/disable radar presence automation; pins a manual override so the schedule won't flip it.</td><td><code>radarAutoMode</code> · <code>radar_auto</code></td></tr>
+    <tr><td><code>eco</code> / <code>teco</code> / <code>toff</code></td><td>Eco temperature, eco delay (min), off delay (min). Off delay is auto-bumped above eco delay.</td><td>eco_temp · eco_time · off_time</td></tr>
+    <tr><td><code>ota_update</code> + <code>url</code> / <code>version</code></td><td>Queue a server-pull firmware update; runs async in OTATask with trial-boot rollback.</td><td>—</td></tr>
+    <tr><td><code>protocol</code> + <code>state</code> / <code>code</code></td><td>Send a raw / dynamic IR frame via a named protocol.</td><td>—</td></tr>
+  </table>
+  <div class="note"><strong>Reboot note for the two NEW toggles:</strong> their state is not sent in telemetry, so after a device restart the backend should re-send each command and wait for its <code>ack</code> (<code>action = enforcement</code> / <code>remote_ir</code>) to re-sync the dashboard buttons.</div>
+</div>
+
+<!-- PAGE 5 : STATE MACHINE -->
+<div class="page">
+  <h2>5 · AC state machine &amp; what drives it</h2>
+  <div class="diagram"><div class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> AUTO_OFF
+  AUTO_OFF --> AUTO_ON_NORMAL: presence · power ON · temp cmd · schedule ON
+  AUTO_ON_NORMAL --> AUTO_ON_ECO: room empty &ge; Eco delay
+  AUTO_ON_ECO --> AUTO_ON_NORMAL: presence returns
+  AUTO_ON_NORMAL --> AUTO_OFF: power OFF · schedule end
+  AUTO_ON_ECO --> AUTO_OFF: room empty &ge; Off delay · schedule end
+  note right of AUTO_ON_NORMAL
+    The enforce timer re-sends the
+    CURRENT state every 3 min so a
+    missed IR frame is corrected —
+    skipped when enforcementEnabled = false
+  end note
+  </div></div>
+  <p class="legend">Three states only. Radar walks Normal&rarr;Eco&rarr;Off as a room empties; presence snaps it back to Normal.</p>
+</div>
+
+<!-- PAGE 6 : RADAR GATING -->
+<div class="page">
+  <h2>6 · "Schedule is king" — when may radar act?</h2>
+  <div class="diagram"><div class="mermaid">
+flowchart LR
+  classDef q fill:#dbeafe,stroke:#2563eb,color:#0f172a;
+  classDef no fill:#fee2e2,stroke:#dc2626,color:#0f172a;
+  classDef yes fill:#dcfce7,stroke:#16a34a,color:#0f172a;
+
+  EV(["radar event<br/>presence · eco · off"]) --> G0{"radarAutoMode<br/>on?"}:::q
+  G0 -->|no| D1["ignore"]:::no
+  G0 -->|yes| G1{"radarReady?<br/>scheduleBootDone<br/>OR offline failsafe"}:::q
+  G1 -->|no| D2["ignore —<br/>wait for schedule's<br/>first boot decision"]:::no
+  G1 -->|yes| G2{"blockRadar?<br/>schedule exists +<br/>clock valid +<br/>outside all segments"}:::q
+  G2 -->|yes| D3["ignore —<br/>outside scheduled hours"]:::no
+  G2 -->|no| ACT["drive AC<br/>Normal / Eco / Off"]:::yes
+  </div></div>
+  <div class="note"><strong>Offline failsafe:</strong> if the broker is unreachable AND the clock never synced for 60 s, SchedTask forces <code>radarAutoMode = true</code> and sets <code>isOfflineFailsafeActive</code> (solid magenta LED) so the room is still automated locally. When time/broker returns, the schedule resumes control. — Neither new toggle touches these gates, the schedule, or the eco/off countdowns.</div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: false, theme: "default", securityLevel: "loose",
+    themeVariables: { fontSize: "17px" },
+    flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 38, rankSpacing: 55, padding: 8 }
+  });
+  (async () => { try { await mermaid.run(); } catch (e) { console.error(e); } })();
+</script>
+</body>
+</html>

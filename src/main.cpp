@@ -81,6 +81,8 @@ void setup() {
     sysData.lastPresenceTime = millis();
     sysData.switch_gsm_wifi = preferences.getBool("use_wifi", true);
     sysData.flapDelaySec = preferences.getULong("flap_delay", 10);
+    sysData.enforcementEnabled = preferences.getBool("enforce_en", true);
+    sysData.remoteIrEnabled = preferences.getBool("remote_ir_en", true);
     // Radar detection range is NOT stored on the ESP32 — the radar keeps it in its
     // own flash. The sensor task reads it back for display once streaming is up.
     

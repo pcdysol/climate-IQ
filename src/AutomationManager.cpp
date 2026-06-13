@@ -63,6 +63,13 @@ namespace AutomationManager
         NetworkManager::publishACK(triggerSource, detail);
 
         ESP_LOGI(TAG, "IR Transmitted [%s]: %s", triggerSource, detail);
+
+        // Re-arm the both-off manual-change detector: after any device-initiated AC
+        // command the intended state is authoritative again, so clear the dedup
+        // baseline and the next manual remote deviation reports fresh (and is judged
+        // against the new state — this is what keeps it correct across schedule moves).
+        sysData.manualRptPower = -1;
+        sysData.manualRptTemp = -1;
     }
 
     // The timer callbacks run in the FreeRTOS timer-service context, so they do
@@ -251,9 +258,14 @@ namespace AutomationManager
                     break;
 
                 case EVENT_ENFORCE_TRIGGER:
-                    // Periodic (3-min) re-assertion. When clock is invalid (offline
-                    // boot) the helper skips the schedule check so the AC state loaded
-                    // from NVS/radar is not overridden until time is available.
+                    // Periodic (3-min) re-assertion. Backend can disable JUST this
+                    // periodic re-assert via enforcement_control; the manual-override
+                    // revert below is deliberately left active either way.
+                    if (!sysData.enforcementEnabled.load())
+                        break;
+                    // When clock is invalid (offline boot) the helper skips the schedule
+                    // check so the AC state loaded from NVS/radar is not overridden until
+                    // time is available.
                     enforceCurrentState(clockValid);
                     break;
 

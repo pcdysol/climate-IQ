@@ -169,6 +169,19 @@ struct SystemData {
     unsigned long flapDelayStart = 0;      ///< millis() when the flap delay began.
     bool isFlapDelayActive = false;        ///< Flap-delay blind spot currently active.
 
+    // --- Backend feature toggles (set via MQTT, persisted to NVS) ---
+    // Atomic: written by CommandProcessor (network task), read by the automation
+    // and sensor tasks. Default true preserves the historic always-on behaviour.
+    std::atomic<bool> enforcementEnabled{true}; ///< false = suppress the periodic 3-min AC re-assertion (manual-override revert still applies).
+    std::atomic<bool> remoteIrEnabled{true};    ///< false = stop detecting/logging foreign AC remote presses.
+
+    // --- Dedup baseline for the both-off manual-remote-change ACK (report-only) ---
+    // These ONLY gate duplicate "manual_remote_change" reports — they never drive the
+    // AC and are independent of the schedule's currentNormalTemp. Re-armed (set to -1)
+    // by executeACCommand() so a later manual deviation is always reported fresh.
+    std::atomic<int> manualRptPower{-1}; ///< Last reported manual power: -1 unset, 0 off, 1 on.
+    std::atomic<int> manualRptTemp{-1};  ///< Last reported manual setpoint (°C); -1 = unset.
+
     // --- State Machine & Scheduling ---
     std::atomic<AutoState> acAutoState{AUTO_OFF};      ///< Current AC state machine state.
     std::atomic<bool> isInsideSchedule{false};         ///< Now within a configured segment.

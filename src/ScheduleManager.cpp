@@ -130,6 +130,20 @@ namespace ScheduleManager
         return false;
     }
 
+    /// @return the active segment's radar field for the current local time
+    ///         (1 enable, 2 disable), or -1 if outside all segments / no synced clock.
+    int currentSegmentRadar()
+    {
+        struct tm timeinfo;
+        if (!getLocalTime(&timeinfo, 0))
+            return -1; // no synced clock — caller treats as "not in schedule"
+        ScheduleSegment seg;
+        int minute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+        if (!findSegment(timeinfo.tm_wday, minute, seg))
+            return -1; // outside all segments
+        return (int)seg.radar;
+    }
+
     /// @return true if every field of the two segments is identical.
     bool sameSegment(const ScheduleSegment &a, const ScheduleSegment &b)
     {

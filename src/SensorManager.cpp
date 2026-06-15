@@ -22,8 +22,13 @@
 #include "NetworkManager.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
+#include <Preferences.h>
 
 static const char *TAG = "SENSOR";
+
+/// Shared NVS handle (namespace "ir_data"), defined in main.cpp. Used here for the
+/// one-time radar-Bluetooth-disable flag (see disableRadarBluetooth()).
+extern Preferences preferences;
 
 // --- Private Objects ---
 static Adafruit_HDC1000 hdc = Adafruit_HDC1000();
@@ -110,6 +115,49 @@ static void applyRadarRange(int cm)
              ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
 }
 
+// Disable the radar's Bluetooth so no external BLE app (e.g. HLKRadarTool) can grab the
+// module's single config-mode state machine over the air and starve our UART stream —
+// the root cause of the "frozen radar value" hang. Notes (LD2412 datasheet 2.2.19):
+//   - Command word 0x00A4, value 0x0000 = OFF (requestBToff() sends exactly this). The
+//     setting is persistent (kept across power-down) and takes effect after a module
+//     REBOOT, so on success we reboot and re-link.
+//   - We still verify the ACK: a config frame can be lost amongst the live data stream,
+//     so a false negative is possible even though the command is supported.
+//   - ANTI-HANG GUARANTEE: a failed/short-circuited requestBToff() can leave the module
+//     in config mode (no data frames). So we ALWAYS finish by forcing the module back
+//     into enhanced streaming — whether BT-off succeeded, failed, or rebooted.
+// MUST run on the sensor task (sole owner of the radar UART). @return true if BT-off was
+// accepted by the module.
+static bool disableRadarBluetooth()
+{
+    if (!globalState || !globalState->sensorReady)
+        return false;
+
+    esp_task_wdt_reset();
+    radar.begin(); // resync the config flag (forces isConfig=false) before the chain
+
+    bool accepted = radar.requestBToff();
+    if (accepted)
+    {
+        ESP_LOGI(TAG, "Radar Bluetooth disabled; rebooting module to apply.");
+        radar.requestReboot();           // BT change only applies after a reboot
+        vTaskDelay(pdMS_TO_TICKS(1500));  // let the module restart
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Radar BT-off not ACKed (lost in data stream?) — will retry next boot.");
+    }
+
+    // ALWAYS force streaming back on so a failed/partial/reboot attempt can never leave
+    // the radar stuck in config mode with no data frames.
+    esp_task_wdt_reset();
+    radar.begin();
+    radar.enhancedMode();
+    globalState->sensorReady = true;
+    globalState->lastRadarDataTime = millis();
+    return accepted;
+}
+
 
 namespace SensorManager
 {
@@ -140,7 +188,7 @@ namespace SensorManager
 
         // 2. Initialize LD2412 Radar — RX=17, TX=16 @ 115200 (confirmed)
         sensorSerial.setRxBufferSize(512);
-        sensorSerial.begin(115200, SERIAL_8N1, 16, 17);
+        sensorSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
 
         // Drain startup noise
         unsigned long settleStart = millis();
@@ -169,6 +217,19 @@ namespace SensorManager
             globalState->sensorReady = true;
             globalState->lastRadarDataTime = millis();
             ESP_LOGI(TAG, "Radar boot: success");
+
+            // Lock out external BLE config (HLKRadarTool) so the ESP32 is the sole master
+            // of the radar — a phone can't enter config mode over Bluetooth and freeze the
+            // UART data stream. The BT-off setting is persistent in the radar's own flash
+            // (datasheet 2.2.19), so we only need to do it ONCE: a "radar_bt_off" NVS flag
+            // records success and skips the (radar-rebooting) disable on every later boot.
+            // The flag stays false until BT-off is actually ACKed, so a lost ACK retries
+            // next boot; a radar factory reset re-enables BT and re-runs this (see below).
+            if (!preferences.getBool("radar_bt_off", false))
+            {
+                if (disableRadarBluetooth())
+                    preferences.putBool("radar_bt_off", true);
+            }
         }
         else
         {
@@ -294,7 +355,7 @@ namespace SensorManager
     {
         sensorSerial.end();
         delay(200);
-        sensorSerial.begin(115200, SERIAL_8N1, 17, 16);
+        sensorSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
         if (radar.begin())
         {
             radar.enhancedMode();
@@ -402,6 +463,13 @@ namespace SensorManager
             radar.begin();          // re-establish the link
             radar.enhancedMode();   // re-enable live energy streaming
             globalState->sensorReady = true;
+
+            // A factory reset restores the module's defaults — which turns Bluetooth back
+            // ON. Re-disable it so the external-BLE lockout survives a reset (otherwise
+            // this very feature silently re-opens the freeze hole), and update the NVS flag
+            // so the init()-time gate stays truthful (re-arm a retry if the re-disable
+            // didn't ACK).
+            preferences.putBool("radar_bt_off", disableRadarBluetooth());
             ESP_LOGI(TAG, "Radar factory reset complete.");
         }
         else

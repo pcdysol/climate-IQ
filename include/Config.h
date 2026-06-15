@@ -28,6 +28,10 @@
 #define GSM_RX_PIN      16
 #define GSM_TX_PIN      17
 
+// --- Radar LD2412 (UART) ---
+#define RADAR_RX_PIN    16
+#define RADAR_TX_PIN    17
+
 // --- RGB LED (Common Anode) ---
 #define RED_PIN         33
 #define GREEN_PIN       32
@@ -102,7 +106,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.13"
+#define FW_VERSION              "1.0.14"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

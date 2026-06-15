@@ -173,7 +173,7 @@ void sendACFallback(bool turnOn, int targetTemp) {
     }
 
     if (protocol == decode_type_t::UNKNOWN) {
-        ESP_LOGW(TAG, "No valid protocol saved. Falling back to ELECTRA_AC.");
+        ESP_LOGW(TAG, "No valid protocol saved");
     }
 
     ac.next.protocol = protocol;

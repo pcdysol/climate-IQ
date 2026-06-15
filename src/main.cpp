@@ -66,11 +66,16 @@ void setup() {
     // Add this inside setup(), BEFORE IRManager::init():
     irMutex = xSemaphoreCreateMutex();
     IRManager::init();
+
+    // Open NVS BEFORE SensorManager::init(): the radar bring-up reads the persistent
+    // "radar_bt_off" flag to decide whether it still needs to disable the radar's
+    // Bluetooth (a one-time, radar-rebooting operation).
+    preferences.begin("ir_data", false);
+
     SensorManager::init(&sysData);
     WebDashboard::init();
-    
-    // 2. Preferences & State Load
-    preferences.begin("ir_data", false);
+
+    // 2. State Load
     sysData.currentEcoTemp = preferences.getInt("eco_temp", 26);
     sysData.TEcoTime = preferences.getULong("eco_time", 120000);
     sysData.TOffTime = preferences.getULong("off_time", 300000);

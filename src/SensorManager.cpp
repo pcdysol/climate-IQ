@@ -34,6 +34,14 @@ static volatile bool radarStreamConfirmed = false;
 // Add this near the top of SensorManager.cpp, after the includes
 extern TaskHandle_t sensorsTaskHandle;
 
+// --- Web-triggered IR learn mailbox (executed on the sensor task) ---
+// The web task fills these via requestLearn() and signals notify bit 4; the sensor
+// task runs the learn (sole owner of the IR receiver) and publishes the result.
+static char             learnKey[24]    = {0};   ///< NVS key to learn into (e.g. "ir_24").
+static bool             learnIsProtocol = false; ///< true = learn just the protocol.
+static std::atomic<int> learnStatus{0};          ///< 0 idle, 1 in progress, 2 done.
+static std::atomic<int> learnResult{1};          ///< 0 ok, 1 timeout, 2 unknown protocol.
+
 // LD2412 distance-gate width: 0.75 m per gate (datasheet). We use this fixed value
 // instead of querying resolution (the LD2410 0xAB query isn't supported on LD2412).
 #define RADAR_GATE_CM 75
@@ -450,6 +458,39 @@ namespace SensorManager
         return globalState ? globalState->radarRangeCm.load() : 0;
     }
 
+    // --- IR learn triggers (executed on the sensor task) ----------------------
+    bool requestLearn(const char* storageKey, bool isProtocol)
+    {
+        if (sensorsTaskHandle == NULL || storageKey == nullptr)
+            return false;
+        if (learnStatus.load() == 1)
+            return false; // a learn is already running
+        // Don't collide with a radar config op: both block the same task, and a
+        // long calibration would stall the learn far past the web client's wait.
+        if (globalState && globalState->radarCalStatus.load() == 1)
+            return false;
+
+        strncpy(learnKey, storageKey, sizeof(learnKey) - 1);
+        learnKey[sizeof(learnKey) - 1] = '\0';
+        learnIsProtocol = isProtocol;
+        learnResult.store(1); // default to timeout until the learn proves otherwise
+        learnStatus.store(1); // in progress
+        xTaskNotify(sensorsTaskHandle, (1 << 4), eSetBits);
+        return true;
+    }
+
+    int getLearnStatus()
+    {
+        return learnStatus.load();
+    }
+
+    int consumeLearnResult()
+    {
+        int r = learnResult.load();
+        learnStatus.store(0); // back to idle so the next learn can be queued
+        return r;
+    }
+
     /**
      * @brief Flag the radar for recovery if no frame has arrived for RADAR_STALE_MS.
      *
@@ -497,6 +538,7 @@ namespace SensorManager
      *   - bit 1: run auto-calibration
      *   - bit 2: factory-reset the radar
      *   - bit 3: apply a new detection range
+     *   - bit 4: learn an IR code/protocol (touches the IR receiver this task owns)
      * It also runs the always-on IR-remote listener, the one-time boot range
      * read, the button poll, and presence-time accounting every tick.
      * @note Spawned once; never returns. Sole owner of the radar UART.
@@ -527,6 +569,14 @@ namespace SensorManager
                 if (notificationValue & (1 << 3)) // web: set detection range
                 {
                     applyRadarRange(globalState->radarDesiredCm.load());
+                }
+                if (notificationValue & (1 << 4)) // web: learn an IR code/protocol
+                {
+                    // Runs on THIS task, which also owns pollRemoteListener() — so the
+                    // receiver is never touched from two cores at once (the old bug).
+                    int r = IRManager::learnCommand(learnKey, learnIsProtocol);
+                    learnResult.store(r);
+                    learnStatus.store(2); // done — web handler consumes the result
                 }
             }
             else

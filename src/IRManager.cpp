@@ -226,10 +226,18 @@ bool sendACCommand(bool turnOn, int targetTemp) {
  * @return 0 success, 1 timeout, 2 unknown protocol.
  */
 int learnCommand(const char* storageKey, bool isProtocol) {
-    // Take exclusive ownership of the receiver so the background listener
-    // (pollRemoteListener) stops touching irrecv while we learn.
+    // NOTE: this now runs ON THE SENSOR TASK (via SensorManager::requestLearn),
+    // the same task that runs pollRemoteListener(), so the IR receiver is never
+    // accessed from two cores at once. learnActive is kept as belt-and-braces.
     learnActive = true;
-    vTaskDelay(pdMS_TO_TICKS(20)); // let an in-flight listener tick finish
+
+    // Re-initialise the receiver cleanly. enableIRIn() on its own (with no matching
+    // disableIRIn) re-runs timerBegin()/attachInterrupt() WITHOUT freeing the old
+    // timer+ISR — so the first re-init works but later ones leave a dead/NULL timer
+    // and the learn captures nothing (the "first learn works, then timeout" bug).
+    // disableIRIn() performs the timerEnd()/detachInterrupt() teardown first, so
+    // every re-init starts from a clean slate.
+    irrecv.disableIRIn();
     irrecv.enableIRIn();
     irrecv.resume(); // discard anything already buffered
 
@@ -241,6 +249,9 @@ int learnCommand(const char* storageKey, bool isProtocol) {
 
     while (millis() - startTime < 10000) {
         if (irrecv.decode(&results)) {
+            // Diagnostic: shows whether the receiver is capturing at all. A frame we
+            // reject still logs here; total silence means the RX timer/ISR is dead.
+            ESP_LOGI(TAG, "decode: rawlen=%d type=%d", results.rawlen, (int)results.decode_type);
             if (results.rawlen < 30) {
                 irrecv.resume();
                 continue;

@@ -28,6 +28,17 @@ namespace Indicator {
     void indicateIRSent();
     /// Blocking flash: three yellow blinks (warning).
     void indicateWarning();
+    /// Blocking flash: distinctive purple strobe — IR learn failed / remote not recognised.
+    void indicateLearnFail();
+
+    /**
+     * @brief Blocking LED pinout self-test: light RED, then GREEN, then BLUE alone.
+     *
+     * Drives each RGB channel by itself for ~1s with a serial note of which GPIO it
+     * is driving, so you can confirm the physical colour matches the pin. If the
+     * wrong colour lights, swap the offending *_PIN defines in Config.h.
+     */
+    void selfTest();
 
     /// @return Debounced button event (short = enter AP, long-hold = exit AP).
     ButtonEvent checkButton();

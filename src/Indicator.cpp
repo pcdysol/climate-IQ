@@ -239,4 +239,44 @@ namespace Indicator
             delay(150);
         }
     }
+
+    /// Blocking: fast alternating red/blue strobe (5x) — IR learn failed / remote
+    /// not recognised. Uses pure single channels (no dim colour-mixing) and a
+    /// police-light cadence so it's unmistakable and distinct from the calm
+    /// 3-blink red error.
+    void indicateLearnFail()
+    {
+        ledOff();
+        for (int i = 0; i < 5; i++)
+        {
+            setColor(1, 0, 0); // Red
+            delay(120);
+            setColor(0, 0, 1); // Blue
+            delay(120);
+        }
+        ledOff();
+    }
+
+    /// Blocking: drive each RGB channel alone so the physical colour can be matched
+    /// to its GPIO. Watch the serial log: it prints the pin it is driving while the
+    /// LED is lit. Wrong colour => swap the *_PIN defines in Config.h.
+    void selfTest()
+    {
+        struct { const char *label; int pin; } channels[] = {
+            {"RED_PIN",   RED_PIN},
+            {"GREEN_PIN", GREEN_PIN},
+            {"BLUE_PIN",  BLUE_PIN},
+        };
+        for (auto &c : channels)
+        {
+            ledOff();
+            Serial.printf("[LED SELF-TEST] Driving %s (GPIO%d) -> that colour should light now\n",
+                          c.label, c.pin);
+            digitalWrite(c.pin, LOW); // common anode: LOW = ON
+            delay(1000);
+            ledOff();
+            delay(300);
+        }
+        Serial.println("[LED SELF-TEST] Done. If a colour was wrong, swap the *_PIN defines in Config.h.");
+    }
 } // end namespace

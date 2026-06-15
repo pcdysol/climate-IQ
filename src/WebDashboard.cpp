@@ -590,9 +590,31 @@ window.onload=function(){refresh();};
             server.send(200, "application/json; charset=utf-8", json); });
 
     // --- IR Learning Helpers ---
+    // The learn touches the IR receiver, which is owned by the sensor task, so we
+    // dispatch it there (requestLearn) and wait here for the result. This keeps the
+    // synchronous HTTP contract the UI expects while moving all receiver access onto
+    // the one task that owns it — no cross-core sharing of irrecv.
     auto handleLearn = [](const char *key, bool isProtocol)
     {
-      int result = IRManager::learnCommand(key, isProtocol);
+      if (!SensorManager::requestLearn(key, isProtocol))
+      {
+        Indicator::indicateError();
+        server.send(409, "text/plain", "Radar/IR busy. Try again in a moment.");
+        return;
+      }
+
+      // The learn blocks the sensor task up to ~10s; give it a little headroom.
+      unsigned long start = millis();
+      while (SensorManager::getLearnStatus() != 2 && millis() - start < 12000)
+        delay(50);
+
+      // consumeLearnResult() resets the status to idle so a retry can be queued.
+      // If the task didn't report back in time, force a timeout result (1).
+      bool finished = (SensorManager::getLearnStatus() == 2);
+      int result = SensorManager::consumeLearnResult();
+      if (!finished)
+        result = 1;
+
       if (result == 0)
       {
         Indicator::indicateSuccess();
@@ -600,12 +622,15 @@ window.onload=function(){refresh();};
       }
       else if (result == 1)
       {
-        Indicator::indicateError();
+        // Heard nothing at all — purple learn-fail strobe so it's clearly distinct
+        // from a saved/success cue.
+        Indicator::indicateLearnFail();
         server.send(408, "text/plain", "Timeout: No remote signal detected.");
       }
       else
       {
-        Indicator::indicateError();
+        // Got a signal but couldn't identify the protocol — same learn-fail strobe.
+        Indicator::indicateLearnFail();
         server.send(400, "text/plain", "Error: Protocol not recognized.");
       }
     };

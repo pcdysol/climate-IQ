@@ -49,6 +49,19 @@ namespace SensorManager {
     /// @return Last detection-range boundary (cm) read back from the radar.
     int  getRangeCm();
 
+    // --- Web-triggered IR learning ---
+    // The IR receiver is owned by the sensor task (it runs the always-on remote
+    // listener), so learning a code/protocol — which also touches the receiver —
+    // MUST run there too, never on the web task. requestLearn() signals the sensor
+    // task; the web handler then polls getLearnStatus() and consumeLearnResult().
+
+    /// Queue an IR learn (key + protocol/raw) onto the sensor task. @return true if accepted.
+    bool requestLearn(const char* storageKey, bool isProtocol);
+    /// @return Learn progress: 0 idle, 1 in progress, 2 done (result ready).
+    int  getLearnStatus();
+    /// Read the finished learn result (0 ok, 1 timeout, 2 unknown protocol) and reset to idle.
+    int  consumeLearnResult();
+
     /// FreeRTOS task: poll loop + notification-driven radar maintenance + IR-RX listener.
     void TaskSensors(void *pvParameters);
 }

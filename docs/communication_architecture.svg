@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1070" height="540" viewBox="0 0 1070 540" font-family="'Segoe UI', Roboto, Arial, sans-serif">
+  <defs>
+    <filter id="sh" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.16"/>
+    </filter>
+    <marker id="ae" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    <marker id="asr" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+  </defs>
+<rect x="0" y="0" width="1070" height="540" fill="#ffffff"/>
+<text x="535" y="46" text-anchor="middle" font-size="23" font-weight="700" fill="#0f172a">Eco Pulse — Communication Architecture</text>
+  <line x1="325" y1="175" x2="455" y2="175" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="358" y="154" width="64" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="390" y="166" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">UART 16/17</text>
+  <line x1="325" y1="247" x2="455" y2="247" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="380" y="226" width="19" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="390" y="238" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">I²C</text>
+  <line x1="325" y1="319" x2="455" y2="319" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="361" y="298" width="58" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="390" y="310" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">IR 38 kHz</text>
+  <line x1="325" y1="391" x2="455" y2="391" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="377" y="370" width="26" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="390" y="382" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">GPIO</text>
+  <line x1="325" y1="463" x2="455" y2="463" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="377" y="442" width="26" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="390" y="454" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">GPIO</text>
+  <line x1="665" y1="210" x2="780" y2="210" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="664" y="189" width="116" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="722" y="201" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">MQTT · Wi-Fi / GSM</text>
+  <line x1="665" y1="320" x2="780" y2="320" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="677" y="299" width="90" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="722" y="311" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">NTP / cell RTC</text>
+  <line x1="665" y1="430" x2="780" y2="430" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)" marker-start="url(#asr)"/>
+  <rect x="699" y="409" width="45" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="722" y="421" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">HTTP(S)</text>
+  <rect x="455" y="160" width="210" height="320" rx="14" fill="#1e293b" filter="url(#sh)"/>
+  <text x="560" y="317" text-anchor="middle" font-size="18" font-weight="700" fill="#ffffff">ESP32 CORE</text>
+  <text x="560" y="335" text-anchor="middle" font-size="11.5" fill="#ffffff" opacity="0.92">FreeRTOS · NVS</text>
+  <rect x="75" y="148" width="250" height="54" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c200_175"><rect x="75" y="148" width="250" height="54" rx="13"/></clipPath>
+  <g clip-path="url(#c200_175)"><rect x="75" y="148" width="250" height="6" fill="#2563eb"/></g>
+  <rect x="75" y="148" width="250" height="54" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="200" y="181" text-anchor="middle" font-size="14" font-weight="700" fill="#2563eb">LD2412 / GSM</text>
+  <rect x="75" y="220" width="250" height="54" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c200_247"><rect x="75" y="220" width="250" height="54" rx="13"/></clipPath>
+  <g clip-path="url(#c200_247)"><rect x="75" y="220" width="250" height="6" fill="#0891b2"/></g>
+  <rect x="75" y="220" width="250" height="54" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="200" y="253" text-anchor="middle" font-size="14" font-weight="700" fill="#0891b2">HDC1080</text>
+  <rect x="75" y="292" width="250" height="54" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c200_319"><rect x="75" y="292" width="250" height="54" rx="13"/></clipPath>
+  <g clip-path="url(#c200_319)"><rect x="75" y="292" width="250" height="6" fill="#ec4899"/></g>
+  <rect x="75" y="292" width="250" height="54" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="200" y="325" text-anchor="middle" font-size="14" font-weight="700" fill="#ec4899">IR RX / TX</text>
+  <rect x="75" y="364" width="250" height="54" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c200_391"><rect x="75" y="364" width="250" height="54" rx="13"/></clipPath>
+  <g clip-path="url(#c200_391)"><rect x="75" y="364" width="250" height="6" fill="#7c3aed"/></g>
+  <rect x="75" y="364" width="250" height="54" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="200" y="397" text-anchor="middle" font-size="14" font-weight="700" fill="#7c3aed">LED / Button</text>
+  <rect x="75" y="436" width="250" height="54" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c200_463"><rect x="75" y="436" width="250" height="54" rx="13"/></clipPath>
+  <g clip-path="url(#c200_463)"><rect x="75" y="436" width="250" height="6" fill="#f59e0b"/></g>
+  <rect x="75" y="436" width="250" height="54" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="200" y="469" text-anchor="middle" font-size="14" font-weight="700" fill="#f59e0b">IR MOSFET</text>
+  <rect x="780" y="182" width="250" height="56" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c905_210"><rect x="780" y="182" width="250" height="56" rx="13"/></clipPath>
+  <g clip-path="url(#c905_210)"><rect x="780" y="182" width="250" height="6" fill="#0d9488"/></g>
+  <rect x="780" y="182" width="250" height="56" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="905" y="216" text-anchor="middle" font-size="14" font-weight="700" fill="#0d9488">MQTT Broker</text>
+  <rect x="780" y="292" width="250" height="56" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c905_320"><rect x="780" y="292" width="250" height="56" rx="13"/></clipPath>
+  <g clip-path="url(#c905_320)"><rect x="780" y="292" width="250" height="6" fill="#0891b2"/></g>
+  <rect x="780" y="292" width="250" height="56" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="905" y="326" text-anchor="middle" font-size="14" font-weight="700" fill="#0891b2">Time source</text>
+  <rect x="780" y="402" width="250" height="56" rx="13" fill="#ffffff" filter="url(#sh)"/>
+  <clipPath id="c905_430"><rect x="780" y="402" width="250" height="56" rx="13"/></clipPath>
+  <g clip-path="url(#c905_430)"><rect x="780" y="402" width="250" height="6" fill="#6366f1"/></g>
+  <rect x="780" y="402" width="250" height="56" rx="13" fill="none" stroke="#e2e8f0"/>
+  <text x="905" y="436" text-anchor="middle" font-size="14" font-weight="700" fill="#6366f1">OTA server</text>
+</svg>

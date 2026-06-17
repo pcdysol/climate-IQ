@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="600" viewBox="0 0 1100 600" font-family="'Segoe UI', Roboto, Arial, sans-serif">
+  <defs>
+    <filter id="sh" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.16"/>
+    </filter>
+    <marker id="ae" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+    <marker id="asr" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+  </defs>
+<rect x="0" y="0" width="1100" height="600" fill="#ffffff"/>
+<text x="550" y="46" text-anchor="middle" font-size="23" font-weight="700" fill="#0f172a">Eco Pulse — AC Automation State Machine</text>
+  <path d="M320,282 C 450,180 540,160 658,172" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#ae)"/>
+  <rect x="437" y="138" width="135" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="505" y="150" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">room occupied (radar)</text>
+  <path d="M660,205 C 540,250 460,290 349,305" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#ae)"/>
+  <rect x="370" y="246" width="270" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="505" y="258" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">schedule end / outside segment / cloud OFF</text>
+  <path d="M660,470 C 530,455 460,380 349,335" fill="none" stroke="#64748b" stroke-width="2.5" marker-end="url(#ae)"/>
+  <rect x="432" y="408" width="135" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="500" y="420" text-anchor="middle" font-size="11.5" font-weight="600" fill="#475569">off countdown elapsed</text>
+  <line x1="830" y1="222" x2="830" y2="428" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)"/>
+  <rect x="845" y="313" width="135" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="845" y="325" text-anchor="start" font-size="11.5" font-weight="600" fill="#475569">eco countdown elapsed</text>
+  <line x1="750" y1="428" x2="750" y2="222" stroke="#64748b" stroke-width="2.5"False marker-end="url(#ae)"/>
+  <rect x="674" y="313" width="71" height="17" rx="4" fill="#ffffff" opacity="0.92"/><text x="745" y="325" text-anchor="end" font-size="11.5" font-weight="600" fill="#475569">re-occupied</text>
+  <rect x="135" y="280" width="210" height="80" rx="14" fill="#64748b" filter="url(#sh)"/>
+  <text x="240" y="325" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">AUTO_OFF</text>
+  <rect x="660" y="140" width="260" height="80" rx="14" fill="#059669" filter="url(#sh)"/>
+  <text x="790" y="177" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">AUTO_ON_NORMAL</text>
+  <text x="790" y="195" text-anchor="middle" font-size="11.5" fill="#ffffff" opacity="0.92">normal setpoint</text>
+  <rect x="660" y="430" width="260" height="80" rx="14" fill="#d97706" filter="url(#sh)"/>
+  <text x="790" y="467" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">AUTO_ON_ECO</text>
+  <text x="790" y="485" text-anchor="middle" font-size="11.5" fill="#ffffff" opacity="0.92">raised setpoint</text>
+</svg>

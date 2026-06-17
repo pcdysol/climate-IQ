@@ -72,6 +72,15 @@
 // ===== Radar LD2412 Settings =====
 #define RADAR_STALE_MS          30000 // 30s without a frame = radar is hung
 
+// Radar Bluetooth control. The radar persists BT state in its OWN flash, so the setting
+// survives reboots regardless of this firmware — disabling it once keeps it off even if
+// you stop calling the disable code. To get BLE back you must ACTIVELY re-enable it.
+//   0 = PRODUCTION: keep BT OFF so no external BLE app (HLK tool) can hijack the radar's
+//       config mode and freeze the UART stream (the "frozen radar" hang).
+//   1 = BENCH TESTING: actively turn BT ON at boot so the HLK phone app can connect.
+//       Set back to 0 and reflash for deployment.
+#define RADAR_ENABLE_BT         0
+
 // ===== HDC1080 Settings =====
 #define HDC_REINIT_THRESHOLD    3         // Attempt I2C reset after this many consecutive NaN reads
 
@@ -106,7 +115,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.14"
+#define FW_VERSION              "1.0.15"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

@@ -142,6 +142,15 @@ struct SystemData {
     std::atomic<int> radarDesiredCm{0}; ///< Requested boundary in cm (web -> sensor task).
     std::atomic<int> radarRangeCm{0};   ///< Last range read back from the radar (display).
 
+    // --- Radar unmanned-duration control ("no-one window", executed on the sensor task) ---
+    // After a target leaves, the radar keeps reporting "present" for this many seconds
+    // (datasheet 2.2.5 "unmanned duration"; minimum 5 s). Like the range, it lives in the
+    // radar's own flash, not the ESP32. Web writes radarDesiredNoOne + notifies the sensor
+    // task (bit 5); the task applies it (preserving the current max gate) and writes the
+    // achieved value back to radarNoOneWindow for the dashboard to display.
+    std::atomic<int> radarDesiredNoOne{0}; ///< Requested unmanned duration in s (web -> sensor task).
+    std::atomic<int> radarNoOneWindow{0};  ///< Last unmanned duration (s) read back from the radar (display).
+
     // --- Manual remote-press detection log (IR receiver is always listening) ---
     // Written by the sensor task when a foreign IR frame is detected, read by the
     // web task for the "Remote Activity" dashboard card. Torn reads are harmless

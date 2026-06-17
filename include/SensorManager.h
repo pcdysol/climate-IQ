@@ -49,6 +49,16 @@ namespace SensorManager {
     /// @return Last detection-range boundary (cm) read back from the radar.
     int  getRangeCm();
 
+    // --- Unmanned-duration ("no-one window") control ---
+    // The radar keeps reporting presence for this many seconds after a target leaves
+    // (datasheet 2.2.5, min 5 s). Stored in the radar's own flash; the ESP32 does not
+    // persist it. Applied on the sensor task while preserving the current detection range.
+
+    /// Request a new unmanned duration in seconds (validated/applied on the sensor task). @return true if queued.
+    bool requestSetNoOneWindow(int seconds);
+    /// @return Last unmanned duration (s) read back from the radar.
+    int  getNoOneWindow();
+
     // --- Web-triggered IR learning ---
     // The IR receiver is owned by the sensor task (it runs the always-on remote
     // listener), so learning a code/protocol — which also touches the receiver —

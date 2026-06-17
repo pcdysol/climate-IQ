@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="758" viewBox="0 0 720 758" font-family="'Segoe UI', Roboto, Arial, sans-serif">
+  <defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arr" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="758" fill="#ffffff"/>
+  <text x="360" y="52" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">2 · Cloud Command → Device Action</text>
+  <rect x="250" y="96" width="220" height="52" rx="26" fill="#0891b2" filter="url(#sh)"/>
+  <text x="360" y="129" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">Broker</text>
+  <line x1="360" y1="148" x2="360" y2="182" stroke="#cbd5e1" stroke-width="2.6" marker-end="url(#arr)"/>
+  <rect x="370" y="158" width="43" height="17" rx="4" fill="#ffffff"/>
+  <text x="392" y="170" text-anchor="middle" font-size="11" font-weight="700" fill="#0891b2">MQTT</text>
+  <rect x="90" y="186" width="540" height="58" rx="13" fill="#fff" filter="url(#sh)"/>
+  <clipPath id="cl1_"><rect x="90" y="186" width="540" height="58" rx="13"/></clipPath>
+  <g clip-path="url(#cl1_)"><rect x="90" y="186" width="540" height="6" fill="#0891b2"/></g>
+  <rect x="90" y="186" width="540" height="58" rx="13" fill="none" stroke="#e2e8f0"/>
+  <circle cx="90" cy="215" r="15" fill="#0891b2"/>
+  <text x="90" y="220" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">1</text>
+  <text x="360" y="219" text-anchor="middle" font-size="14.5" font-weight="700" fill="#0f172a">WiFiManager / GSMManager  RX</text>
+  <line x1="360" y1="244" x2="360" y2="278" stroke="#cbd5e1" stroke-width="2.6" marker-end="url(#arr)"/>
+  <rect x="90" y="282" width="540" height="58" rx="13" fill="#fff" filter="url(#sh)"/>
+  <clipPath id="cl2_"><rect x="90" y="282" width="540" height="58" rx="13"/></clipPath>
+  <g clip-path="url(#cl2_)"><rect x="90" y="282" width="540" height="6" fill="#0891b2"/></g>
+  <rect x="90" y="282" width="540" height="58" rx="13" fill="none" stroke="#e2e8f0"/>
+  <circle cx="90" cy="311" r="15" fill="#0891b2"/>
+  <text x="90" y="316" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">2</text>
+  <text x="360" y="315" text-anchor="middle" font-size="14.5" font-weight="700" fill="#0f172a">ArduinoJson deserialize</text>
+  <line x1="360" y1="340" x2="360" y2="374" stroke="#cbd5e1" stroke-width="2.6" marker-end="url(#arr)"/>
+  <rect x="90" y="378" width="540" height="130" rx="13" fill="#fff" filter="url(#sh)"/>
+  <clipPath id="cl3_"><rect x="90" y="378" width="540" height="130" rx="13"/></clipPath>
+  <g clip-path="url(#cl3_)"><rect x="90" y="378" width="540" height="6" fill="#0891b2"/></g>
+  <rect x="90" y="378" width="540" height="130" rx="13" fill="none" stroke="#e2e8f0"/>
+  <circle cx="90" cy="402" r="15" fill="#0891b2"/>
+  <text x="90" y="407" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">3</text>
+  <text x="120" y="407" font-size="14.5" font-weight="700" fill="#0891b2">CommandProcessor::processJSON()</text>
+  <rect x="112" y="434" width="153" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="188" y="454" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">temperature_control</text>
+  <rect x="275" y="434" width="113" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="332" y="454" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">power_control</text>
+  <rect x="398" y="434" width="113" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="454" y="454" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">radar_control</text>
+  <rect x="112" y="474" width="139" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="182" y="494" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">eco / teco / toff</text>
+  <rect x="261" y="474" width="93" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="308" y="494" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">ota_update</text>
+  <rect x="364" y="474" width="240" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="484" y="494" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">dynamic IR (protocol/state/code)</text>
+  <line x1="360" y1="508" x2="360" y2="542" stroke="#cbd5e1" stroke-width="2.6" marker-end="url(#arr)"/>
+  <rect x="90" y="546" width="540" height="90" rx="13" fill="#fff" filter="url(#sh)"/>
+  <clipPath id="cl4_"><rect x="90" y="546" width="540" height="90" rx="13"/></clipPath>
+  <g clip-path="url(#cl4_)"><rect x="90" y="546" width="540" height="6" fill="#0891b2"/></g>
+  <rect x="90" y="546" width="540" height="90" rx="13" fill="none" stroke="#e2e8f0"/>
+  <circle cx="90" cy="570" r="15" fill="#0891b2"/>
+  <text x="90" y="575" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">4</text>
+  <text x="120" y="575" font-size="14.5" font-weight="700" fill="#0891b2">Dispatch to managers</text>
+  <rect x="112" y="602" width="139" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="182" y="622" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">AutomationManager</text>
+  <rect x="261" y="602" width="126" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="324" y="622" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">ScheduleManager</text>
+  <rect x="397" y="602" width="86" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="440" y="622" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">IRManager</text>
+  <rect x="493" y="602" width="93" height="30" rx="8" fill="#f8fafc" stroke="#0891b2" stroke-opacity="0.5"/>
+  <text x="540" y="622" text-anchor="middle" font-size="12" font-weight="600" fill="#334155">OTAManager</text>
+  <line x1="360" y1="636" x2="360" y2="670" stroke="#cbd5e1" stroke-width="2.6" marker-end="url(#arr)"/>
+  <rect x="192" y="674" width="335" height="54" rx="27" fill="#0e7490" filter="url(#sh)"/>
+  <text x="360" y="708" text-anchor="middle" font-size="16" font-weight="700" fill="#fff">persist to NVS  +  publishACK()</text>
+</svg>

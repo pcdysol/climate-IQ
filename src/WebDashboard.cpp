@@ -21,6 +21,7 @@
  *   GET  /calibrate/reset   factory-reset the radar
  *   GET  /calibrate/status  maintenance status (JSON)
  *   POST /setrange          set radar detection range (cm)
+ *   POST /setnoone          set radar unmanned duration / no-one window (sec)
  *   GET  /devdata           live diagnostics + per-gate feed + remote log (JSON)
  *   POST /setparams         save automation parameters
  *   GET  /devschedule       dump stored schedule from NVS (JSON)
@@ -257,6 +258,20 @@ async function applyRange(){
     // pollD() refreshes the badge with the actual snapped value within ~1s.
   }catch(e){alert('Request failed.');}
 }
+function setNoOne(s){document.getElementById('inp-noone').value=s;applyNoOne();}
+async function applyNoOne(){
+  var s=parseInt(document.getElementById('inp-noone').value);
+  if(isNaN(s)||s<1)return alert('Enter at least 1 second.');
+  if(s>255)s=255;
+  var el=document.getElementById('dnoone');
+  try{
+    var res=await fetch('/setnoone?sec='+s,{method:'POST'});
+    var txt=await res.text();
+    if(!res.ok){alert(txt);return;}
+    if(el){el.innerText='Applying…';el.className='badge yellow';}
+    // pollD() refreshes the badge with the actual stored value within ~1s.
+  }catch(e){alert('Request failed.');}
+}
 function buildGates(cid,arr,isMv){
   var clr=isMv?'linear-gradient(90deg,#2563eb,#60a5fa)':'linear-gradient(90deg,#7c3aed,#a78bfa)';
   var h='';
@@ -280,6 +295,10 @@ async function pollD(){
     if(distEl)distEl.innerText=d.radar_distance!=null?(d.radar_distance.toFixed(0)+' cm'):'--';
     var drEl=document.getElementById('drange');
     if(drEl){if(d.radar_range_cm>0){drEl.innerText=(d.radar_range_cm/100).toFixed(2)+' m';drEl.className='badge green';}else{drEl.innerText='Default (max)';drEl.className='badge';}}
+    var noEl=document.getElementById('dnoone');
+    if(noEl&&d.noone_window_sec!=null){if(d.noone_window_sec>0){noEl.innerText=d.noone_window_sec+' s';noEl.className='badge green';}else{noEl.innerText='—';noEl.className='badge';}}
+    var noi=document.getElementById('inp-noone');
+    if(noi&&document.activeElement!==noi&&!noi.value&&d.noone_window_sec>0)noi.value=d.noone_window_sec;
     if(d.mv&&d.mv.length)buildGates('mv-gates',d.mv,true);
     if(d.sx&&d.sx.length)buildGates('st-gates',d.sx,false);
     pr.innerText=d.presence?'DETECTED':'EMPTY';
@@ -444,6 +463,24 @@ window.onload=function(){refresh();};
         <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setRange(6)">6 m</button>
       </div>
       <button class="btn-p" onclick="applyRange()">Apply Range</button>
+    </div>
+    <div class="card">
+      <h3>Radar Presence Hold</h3>
+      <div style="margin-bottom:14px;">
+        <div class="sl">Current unmanned duration</div>
+        <div id="dnoone" class="badge green" style="font-size:0.95rem;">&#8212;</div>
+      </div>
+      <div class="sl" style="margin-bottom:5px;">Keep reporting &ldquo;present&rdquo; after the room empties</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <input type="number" class="pi" id="inp-noone" min="1" max="255" step="1" placeholder="e.g. 10" style="width:100%;">
+        <span class="pu">sec</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setNoOne(5)">5 s</button>
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setNoOne(10)">10 s</button>
+        <button class="btn-v" style="flex:1;min-width:0;margin:0;" onclick="setNoOne(15)">15 s</button>
+      </div>
+      <button class="btn-p" onclick="applyNoOne()">Apply Duration</button>
     </div>
     <div class="card">
       <h3>Automation Parameters</h3>
@@ -715,6 +752,21 @@ window.onload=function(){refresh();};
             else
                 server.send(409, "text/plain", "Radar not ready or busy. Try again."); });
 
+    // Set the radar "unmanned duration" (no-one window) in seconds: how long the radar
+    // keeps reporting presence after a target leaves (datasheet 2.2.5, min 5 s). The sensor
+    // task applies it over UART while PRESERVING the current detection range, and writes it
+    // to the radar's own flash (it persists there; the ESP32 does not store it).
+    server.on("/setnoone", HTTP_POST, []()
+              {
+            if (!server.hasArg("sec")) { server.send(400, "text/plain", "Missing duration."); return; }
+            int sec = server.arg("sec").toInt();
+            if (sec < 1)   sec = 1;    // allow short holds (radar may clamp to its own 5 s min)
+            if (sec > 255) sec = 255;  // radar field / driver byte limit
+            if (SensorManager::requestSetNoOneWindow(sec))
+                server.send(200, "text/plain", "Unmanned duration update sent.");
+            else
+                server.send(409, "text/plain", "Radar not ready or busy. Try again."); });
+
     server.on("/devdata", HTTP_GET, []()
               {
             JsonDocument doc;
@@ -727,6 +779,7 @@ window.onload=function(){refresh();};
         // ----------------------------
             doc["radar_distance"] = sysData.radarDistance;
             doc["radar_range_cm"] = SensorManager::getRangeCm();
+            doc["noone_window_sec"] = SensorManager::getNoOneWindow();
             doc["presence"]     = (bool)sysData.cachedPresence;
             doc["radar_ready"]  = sysData.sensorReady;
 

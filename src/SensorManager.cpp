@@ -60,6 +60,9 @@ static void readAndStoreRange()
         return;
     esp_task_wdt_reset();
     byte gate = radar.getRange(); // raw max-gate register value (via 0x0012 query)
+    // The same 0x0012 basic-parameter query also refreshes the unmanned duration
+    // (no-one window) — cache it here so the dashboard can show the current value.
+    globalState->radarNoOneWindow = radar.getNoOneWindow();
     radar.enhancedMode();
     globalState->lastRadarDataTime = millis();
     // getRange() returns the raw register value we wrote; the radar's EFFECTIVE max
@@ -115,6 +118,47 @@ static void applyRadarRange(int cm)
              ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
 }
 
+// Set the radar's "unmanned duration" / no-one window (seconds): how long it keeps
+// reporting presence after a target leaves (datasheet 2.2.5; the radar's own minimum is
+// 5 s, but we accept 1 s+ and let the read-back show what it stored). MUST run on the
+// sensor task (touches the radar UART via config mode).
+//
+// We deliberately do NOT call radar.setNoOneWindow(): that helper derives the max gate
+// from movingThresholds.N, which this firmware never populates (it only issues the
+// 0x0012 basic-parameter query, never the 0x0161 threshold query). With N == 0 it would
+// write max gate = 1 and silently collapse the detection range to ~0.75 m. Instead we
+// re-send the CURRENT stored max gate (from getRange()) unchanged and only swap the
+// duration — the same explicit approach applyRadarRange() uses — so the range is preserved.
+static void applyNoOneWindow(int seconds)
+{
+    if (!globalState || !globalState->sensorReady)
+        return;
+    if (seconds < 1)   seconds = 1;    // allow short holds (1 s+)
+    if (seconds > 255) seconds = 255;  // setMaxGate's noOneWindow arg is a byte
+    // NOTE: the datasheet states an unmanned-duration minimum of 5 s, so the radar may
+    // clamp values below 5 internally. We still send what was asked and let the read-back
+    // (radarNoOneWindow) report whatever the radar actually stored — no surprises.
+
+    // Resync the config state machine first (forces isConfig=false) so a desynced flag
+    // can't short-circuit the chained config commands — same guard the range path uses.
+    esp_task_wdt_reset();
+    radar.begin();
+
+    byte curGate = radar.getRange(); // authoritative stored max gate (0x0012 query)
+    if (curGate < 1) curGate = 14;   // safety: never let a bad read collapse the range
+
+    esp_task_wdt_reset();
+    bool ok = radar.setMaxGate(curGate, curGate, (byte)seconds);
+    globalState->lastRadarDataTime = millis();
+
+    // Re-enable the engineering stream (killed by config mode) and read back what the
+    // radar actually stored — range is unchanged, only the duration moved.
+    readAndStoreRange();
+
+    ESP_LOGI(TAG, "setNoOneWindow %s: req=%ds gate_preserved=%d -> radar now reports %ds",
+             ok ? "OK" : "FAILED", seconds, curGate, globalState->radarNoOneWindow.load());
+}
+
 // Disable the radar's Bluetooth so no external BLE app (e.g. HLKRadarTool) can grab the
 // module's single config-mode state machine over the air and starve our UART stream —
 // the root cause of the "frozen radar value" hang. Notes (LD2412 datasheet 2.2.19):
@@ -146,6 +190,42 @@ static bool disableRadarBluetooth()
     else
     {
         ESP_LOGW(TAG, "Radar BT-off not ACKed (lost in data stream?) — will retry next boot.");
+    }
+
+    // ALWAYS force streaming back on so a failed/partial/reboot attempt can never leave
+    // the radar stuck in config mode with no data frames.
+    esp_task_wdt_reset();
+    radar.begin();
+    radar.enhancedMode();
+    globalState->sensorReady = true;
+    globalState->lastRadarDataTime = millis();
+    return accepted;
+}
+
+// Re-enable the radar's Bluetooth (for bench testing with the HLK phone app). Mirrors
+// disableRadarBluetooth(): the setting is persistent in the radar's OWN flash and only
+// applies after a reboot, so NOT calling the disable does NOT turn BT back on once it was
+// disabled on an earlier boot — this actively sends BT-on (0x00A4 value 0x0001) and
+// reboots the module. Always restores enhanced streaming afterward (anti-hang guarantee).
+// MUST run on the sensor task. @return true if BT-on was accepted by the module.
+static bool enableRadarBluetooth()
+{
+    if (!globalState || !globalState->sensorReady)
+        return false;
+
+    esp_task_wdt_reset();
+    radar.begin(); // resync the config flag (forces isConfig=false) before the chain
+
+    bool accepted = radar.requestBTon();
+    if (accepted)
+    {
+        ESP_LOGI(TAG, "Radar Bluetooth ENABLED; rebooting module to apply.");
+        radar.requestReboot();           // BT change only applies after a reboot
+        vTaskDelay(pdMS_TO_TICKS(1500));  // let the module restart
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Radar BT-on not ACKed (lost in data stream?) — will retry next boot.");
     }
 
     // ALWAYS force streaming back on so a failed/partial/reboot attempt can never leave
@@ -218,18 +298,30 @@ namespace SensorManager
             globalState->lastRadarDataTime = millis();
             ESP_LOGI(TAG, "Radar boot: success");
 
-            // Lock out external BLE config (HLKRadarTool) so the ESP32 is the sole master
-            // of the radar — a phone can't enter config mode over Bluetooth and freeze the
-            // UART data stream. The BT-off setting is persistent in the radar's own flash
-            // (datasheet 2.2.19), so we only need to do it ONCE: a "radar_bt_off" NVS flag
-            // records success and skips the (radar-rebooting) disable on every later boot.
-            // The flag stays false until BT-off is actually ACKed, so a lost ACK retries
-            // next boot; a radar factory reset re-enables BT and re-runs this (see below).
+            // Bluetooth lockout vs. testing — controlled by RADAR_ENABLE_BT in Config.h.
+            // The BT state is persistent in the radar's own flash (datasheet 2.2.19), so a
+            // "radar_bt_off" NVS flag tracks what we last applied and skips the (radar-
+            // rebooting) command once it matches. A lost ACK leaves the flag unchanged so
+            // it retries next boot; a radar factory reset re-enables BT and re-runs this.
+#if RADAR_ENABLE_BT
+            // TESTING: actively turn BT back ON so the HLK phone app can connect. Required
+            // because a previous BT-off persisted in the radar — simply not disabling it is
+            // not enough. Clear the flag only once BT-on is actually ACKed.
+            if (preferences.getBool("radar_bt_off", false))
+            {
+                if (enableRadarBluetooth())
+                    preferences.putBool("radar_bt_off", false);
+            }
+#else
+            // PRODUCTION: lock out external BLE config (HLKRadarTool) so the ESP32 is the
+            // sole master of the radar — a phone can't enter config mode over Bluetooth and
+            // freeze the UART data stream. Done once; the flag skips it on later boots.
             if (!preferences.getBool("radar_bt_off", false))
             {
                 if (disableRadarBluetooth())
                     preferences.putBool("radar_bt_off", true);
             }
+#endif
         }
         else
         {
@@ -465,11 +557,25 @@ namespace SensorManager
             globalState->sensorReady = true;
 
             // A factory reset restores the module's defaults — which turns Bluetooth back
-            // ON. Re-disable it so the external-BLE lockout survives a reset (otherwise
-            // this very feature silently re-opens the freeze hole), and update the NVS flag
-            // so the init()-time gate stays truthful (re-arm a retry if the re-disable
-            // didn't ACK).
+            // ON. Reconcile BT with our policy (Config.h RADAR_ENABLE_BT) and keep the
+            // "radar_bt_off" flag truthful for the init()-time gate.
+#if RADAR_ENABLE_BT
+            // TESTING: the reset already enabled BT — leave it on, just record the state.
+            preferences.putBool("radar_bt_off", false);
+#else
+            // PRODUCTION: re-disable so the external-BLE lockout survives the reset
+            // (otherwise this very feature silently re-opens the freeze hole).
             preferences.putBool("radar_bt_off", disableRadarBluetooth());
+#endif
+
+            // A factory reset reverts the radar to its defaults (max gate 14, unmanned
+            // duration 5 s), but the driver still holds the PRE-reset values cached and
+            // getRange()/getNoOneWindow() won't re-query while the cache is non-zero. Force
+            // a fresh 0x0012 read, then refresh the dashboard mirrors (range + no-one
+            // window) — otherwise the UI shows the stale values until the next reboot.
+            radar.requestParameters();
+            readAndStoreRange();
+
             ESP_LOGI(TAG, "Radar factory reset complete.");
         }
         else
@@ -524,6 +630,23 @@ namespace SensorManager
     int getRangeCm()
     {
         return globalState ? globalState->radarRangeCm.load() : 0;
+    }
+
+    // --- Unmanned-duration triggers ------------------------------------------
+    bool requestSetNoOneWindow(int seconds)
+    {
+        if (!globalState || !globalState->sensorReady || sensorsTaskHandle == NULL)
+            return false;
+        if (globalState->radarCalStatus.load() == 1)
+            return false; // a calibration/reset is running — don't collide on the UART
+        globalState->radarDesiredNoOne = seconds;
+        xTaskNotify(sensorsTaskHandle, (1 << 5), eSetBits);
+        return true;
+    }
+
+    int getNoOneWindow()
+    {
+        return globalState ? globalState->radarNoOneWindow.load() : 0;
     }
 
     // --- IR learn triggers (executed on the sensor task) ----------------------
@@ -607,6 +730,7 @@ namespace SensorManager
      *   - bit 2: factory-reset the radar
      *   - bit 3: apply a new detection range
      *   - bit 4: learn an IR code/protocol (touches the IR receiver this task owns)
+     *   - bit 5: apply a new unmanned duration (no-one window)
      * It also runs the always-on IR-remote listener, the one-time boot range
      * read, the button poll, and presence-time accounting every tick.
      * @note Spawned once; never returns. Sole owner of the radar UART.
@@ -637,6 +761,10 @@ namespace SensorManager
                 if (notificationValue & (1 << 3)) // web: set detection range
                 {
                     applyRadarRange(globalState->radarDesiredCm.load());
+                }
+                if (notificationValue & (1 << 5)) // web: set unmanned duration (no-one window)
+                {
+                    applyNoOneWindow(globalState->radarDesiredNoOne.load());
                 }
                 if (notificationValue & (1 << 4)) // web: learn an IR code/protocol
                 {

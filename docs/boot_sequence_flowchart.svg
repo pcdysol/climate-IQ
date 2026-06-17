@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="1250" viewBox="0 0 980 1250" font-family="'Segoe UI', Roboto, Arial, sans-serif">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="8.5" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+    <linearGradient id="gStart" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="980" height="1250" fill="#f8fafc"/>
+
+  <!-- title -->
+  <text x="490" y="44" text-anchor="middle" font-size="24" font-weight="700" fill="#0f172a">ClimateIQ — Boot &amp; Initialization Sequence</text>
+  <text x="490" y="68" text-anchor="middle" font-size="13" fill="#64748b">setup() execution order on power-up (src/main.cpp)</text>
+
+  <!-- connectors -->
+  <g stroke="#cbd5e1" stroke-width="2.5" marker-end="url(#arrow)">
+    <line x1="490" y1="140" x2="490" y2="176"/>
+    <line x1="490" y1="268" x2="490" y2="304"/>
+    <line x1="490" y1="442" x2="490" y2="478"/>
+    <line x1="490" y1="582" x2="490" y2="618"/>
+    <line x1="490" y1="738" x2="490" y2="774"/>
+    <line x1="490" y1="932" x2="490" y2="968"/>
+    <line x1="490" y1="1060" x2="490" y2="1096"/>
+  </g>
+
+  <!-- START pill -->
+  <rect x="360" y="86" width="260" height="54" rx="27" fill="url(#gStart)" filter="url(#shadow)"/>
+  <text x="490" y="119" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">⏻  POWER ON RESET</text>
+
+  <!-- Card 1: OTA -->
+  <rect x="270" y="184" width="440" height="84" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="210" r="17" fill="#f59e0b"/>
+  <text x="270" y="216" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">1</text>
+  <text x="304" y="220" font-size="16" font-weight="700" fill="#b45309">OTAManager::init()</text>
+  <text x="304" y="244" font-size="12.5" fill="#64748b">Trial-boot / rollback bookkeeping</text>
+
+  <!-- side note for OTA -->
+  <rect x="730" y="186" width="226" height="80" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+  <line x1="710" y1="222" x2="730" y2="226" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3"/>
+  <text x="744" y="210" font-size="11.5" font-weight="700" fill="#b45309">RUNS FIRST</text>
+  <text x="744" y="230" font-size="11" fill="#92400e">Advance the trial-boot counter</text>
+  <text x="744" y="246" font-size="11" fill="#92400e">&amp; mark the running image valid —</text>
+  <text x="744" y="262" font-size="11" fill="#92400e">so a crash-loop can still revert.</text>
+
+  <!-- Card 2: Hardware init -->
+  <rect x="270" y="310" width="440" height="132" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="336" r="17" fill="#3b82f6"/>
+  <text x="270" y="342" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">2</text>
+  <text x="304" y="344" font-size="16" font-weight="700" fill="#1d4ed8">Hardware initialization</text>
+  <text x="304" y="368" font-size="12.5" fill="#475569">Indicator  ·  irMutex  ·  IRManager</text>
+  <text x="304" y="388" font-size="12.5" fill="#475569">NVS (Preferences)</text>
+  <text x="304" y="408" font-size="12.5" fill="#475569">SensorManager (radar + HDC1080)</text>
+  <text x="304" y="428" font-size="12.5" fill="#475569">WebDashboard routes</text>
+
+  <!-- Card 3: Load state -->
+  <rect x="270" y="484" width="440" height="98" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="510" r="17" fill="#6366f1"/>
+  <text x="270" y="516" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">3</text>
+  <text x="304" y="518" font-size="16" font-weight="700" fill="#4338ca">Load state from NVS</text>
+  <text x="304" y="542" font-size="12.5" fill="#475569">temps  ·  timers  ·  radar flags</text>
+  <text x="304" y="562" font-size="12.5" fill="#475569">transport select  ·  schedule presence</text>
+
+  <!-- Card 4: Queue + timers -->
+  <rect x="270" y="624" width="440" height="114" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="650" r="17" fill="#8b5cf6"/>
+  <text x="270" y="656" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">4</text>
+  <text x="304" y="658" font-size="16" font-weight="700" fill="#6d28d9">Create queue + software timers</text>
+  <text x="304" y="682" font-size="12.5" fill="#475569">automationQueue (depth 10)</text>
+  <text x="304" y="702" font-size="12.5" fill="#475569">health 30s  ·  enforce 3 min</text>
+  <text x="304" y="722" font-size="12.5" fill="#475569">eco / off (one-shot)</text>
+
+  <!-- Card 5: Spawn tasks -->
+  <rect x="270" y="780" width="440" height="152" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="806" r="17" fill="#d946ef"/>
+  <text x="270" y="812" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">5</text>
+  <text x="304" y="814" font-size="16" font-weight="700" fill="#a21caf">Spawn FreeRTOS tasks</text>
+  <g font-size="12" font-weight="600" fill="#be185d">
+    <rect x="290" y="832" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="352" y="854" text-anchor="middle">SchedTask</text>
+    <rect x="428" y="832" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="490" y="854" text-anchor="middle">AutoTask</text>
+    <rect x="566" y="832" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="628" y="854" text-anchor="middle">SensorsTask</text>
+    <rect x="290" y="876" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="352" y="898" text-anchor="middle">WebTask</text>
+    <rect x="428" y="876" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="490" y="898" text-anchor="middle">OTATask</text>
+    <rect x="566" y="876" width="124" height="34" rx="8" fill="#fdf2f8" stroke="#f9a8d4"/>
+    <text x="628" y="898" text-anchor="middle">NetTask</text>
+  </g>
+
+  <!-- Card 6: Network boot -->
+  <rect x="270" y="974" width="440" height="86" rx="14" fill="#ffffff" stroke="#e5e7eb" filter="url(#shadow)"/>
+  <circle cx="270" cy="1000" r="17" fill="#06b6d4"/>
+  <text x="270" y="1006" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">6</text>
+  <text x="304" y="1008" font-size="16" font-weight="700" fill="#0e7490">Network boot + watchdog arm</text>
+  <text x="304" y="1032" font-size="12.5" fill="#475569">AP mode if no SSID  ·  arm task watchdog</text>
+
+  <!-- Card 7: main loop -->
+  <rect x="270" y="1102" width="440" height="92" rx="14" fill="#ecfdf5" stroke="#6ee7b7" filter="url(#shadow)"/>
+  <circle cx="270" cy="1128" r="17" fill="#10b981"/>
+  <text x="270" y="1134" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">∞</text>
+  <text x="304" y="1132" font-size="16" font-weight="700" fill="#047857">main loop()  —  priority 1</text>
+  <text x="304" y="1156" font-size="12.5" fill="#475569">esp_task_wdt_reset()  ·  update LED</text>
+  <text x="304" y="1176" font-size="12.5" fill="#475569">execute deferred reboot</text>
+</svg>

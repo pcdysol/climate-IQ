@@ -126,26 +126,32 @@ def d_acsm():
 # ============================================================ 4. SYSTEM/CONNECTIVITY STATE
 def d_sysstate():
     b = []
-    # BOOTING -> mid
-    for cy in (110, 250, 420, 540):
-        b.append(path(f"M245,320 C 300,320 300,{cy} 353,{cy}"))
+    # BOOTING -> mid states
+    for cy in (110, 250, 410, 520):
+        b.append(path(f"M245,300 C 300,300 305,{cy} 352,{cy}"))
     # WIFI_CONN -> right
-    b.append(path("M585,250 C 660,250 650,200 713,200")); b.append(lab(648, 188, "Wi-Fi + MQTT up"))
-    b.append(path("M585,250 C 660,250 650,300 713,300")); b.append(lab(648, 360, "Wi-Fi up, broker down"))
-    b.append(line(585, 420, 713, 420))
+    b.append(path("M586,250 C 660,250 650,195 702,195")); b.append(lab(645, 182, "Wi-Fi + MQTT up"))
+    b.append(path("M586,250 C 660,250 650,300 702,300")); b.append(lab(645, 356, "broker down"))
+    b.append(line(586, 410, 702, 410))
     b.append(lab(470, 96, "no SSID / config"))
-    b.append(line(830, 330, 830, 508, dash=True)); b.append(lab(845, 420, "60 s offline", "start"))
-    # nodes
-    b.append(solid(150, 320, 190, 70, "SYS_BOOTING", "#64748b"))
-    b.append(solid(470, 110, 230, 60, "SYS_AP_MODE", "#2563eb"))
-    b.append(solid(470, 250, 230, 60, "SYS_WIFI_CONN", "#3b82f6"))
-    b.append(solid(470, 420, 230, 60, "SYS_GSM_CONN", "#0891b2"))
-    b.append(solid(470, 540, 230, 60, "SYS_ERROR", "#dc2626"))
-    b.append(solid(830, 200, 230, 60, "SYS_WIFI_OK", "#059669", "delivering data"))
-    b.append(solid(830, 300, 230, 60, "SYS_MQTT_DOWN", "#ea580c", "not sending"))
-    b.append(solid(830, 420, 230, 60, "SYS_GSM_OK", "#059669"))
-    b.append(solid(830, 540, 300, 64, "Offline failsafe", "#c026d3", "magenta override · radar takes over"))
-    return wrap("Eco Pulse — System / Connectivity State", b, 1120, 620)
+    # offline failsafe is NOT a state: dashed override from a representative offline state
+    b.append(path("M936,300 C 1035,322 1035,520 1002,594", dash=True))
+    b.append(lab(1050, 450, "60 s · no broker + no clock", "middle"))
+    # state nodes — fill = the ACTUAL LED colour driven in Indicator.cpp
+    b.append(solid(150, 300, 190, 64, "SYS_BOOTING", "#e2e8f0", "LED: white", tcol="#0f172a"))
+    b.append(solid(470, 110, 232, 60, "SYS_AP_MODE", "#06b6d4", "LED: cyan blink"))
+    b.append(solid(470, 250, 232, 60, "SYS_WIFI_CONN", "#2563eb", "LED: blue blink"))
+    b.append(solid(470, 410, 232, 60, "SYS_GSM_CONN", "#c026d3", "LED: magenta blink"))
+    b.append(solid(470, 520, 232, 60, "SYS_ERROR", "#dc2626", "LED: red fast"))
+    b.append(solid(820, 195, 232, 60, "SYS_WIFI_OK", "#059669", "LED: green"))
+    b.append(solid(820, 300, 232, 60, "SYS_MQTT_DOWN", "#d97706", "LED: amber blink"))
+    b.append(solid(820, 410, 232, 60, "SYS_GSM_OK", "#a21caf", "LED: magenta"))
+    # offline failsafe OVERRIDE banner (flag, not an enum state)
+    b.append('<rect x="120" y="598" width="990" height="72" rx="14" fill="#c026d3" filter="url(#sh)"/>')
+    b.append('<rect x="120" y="598" width="990" height="72" rx="14" fill="none" stroke="#ffffff" stroke-width="2" stroke-dasharray="8 5" opacity="0.9"/>')
+    b.append('<text x="615" y="627" text-anchor="middle" font-size="15.5" font-weight="700" fill="#ffffff">Offline failsafe — isOfflineFailsafeActive (boolean flag · NOT a SystemState)</text>')
+    b.append('<text x="615" y="649" text-anchor="middle" font-size="11.5" fill="#ffffff" opacity="0.93">Solid-magenta LED override that supersedes ANY state · engages after 60 s with no broker + no clock · radar takes over</text>')
+    return wrap("Eco Pulse — System / Connectivity State  (SystemState enum + offline override)", b, 1240, 712)
 
 # ============================================================ 5. ERROR HANDLING
 def d_error():

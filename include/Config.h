@@ -37,6 +37,11 @@
 #define GREEN_PIN       32
 #define BLUE_PIN        4
 
+// Second RGB LED (Common Anode) for future use (e.g. status vs. alerts). Currently unpopulated on the PCB.
+#define RED_PIN1 23
+#define GREEN_PIN1 12
+#define BLUE_PIN1 15
+
 // ====================================================================
 // ===================== 2. NETWORK CONFIGURATION ====================
 // ====================================================================

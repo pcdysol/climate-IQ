@@ -554,20 +554,35 @@ the indicator, and publishes an ACK.
 
 ### System / Connectivity State (`SystemState`, drives the LED)
 
-```
-SYS_BOOTING -> SYS_AP_MODE (no SSID / config)
-            -> SYS_WIFI_CONN -> SYS_WIFI_OK  (Wi-Fi + MQTT up)
-                             -> SYS_MQTT_DOWN (Wi-Fi up, broker down)
-            -> SYS_GSM_CONN  -> SYS_GSM_OK
-            -> SYS_ERROR
-            -> (offline failsafe: magenta override)
-```
+`SystemState` is an 8-value enum (`SharedState.h`) held in `sysData.currentState`. Its sole job is to
+drive the RGB status LED in `Indicator::update()`; each value maps to a distinct colour/blink so the
+device's connection status is readable at a glance:
 
-### Offline Failsafe
+| State | Meaning | Status LED |
+|-------|---------|------------|
+| `SYS_BOOTING` | Power-on, before any connection attempt | White, solid |
+| `SYS_AP_MODE` | SoftAP configuration portal active | Cyan, blink (500 ms) |
+| `SYS_WIFI_CONN` | Wi-Fi connecting / reconnecting | Blue, blink (500 ms) |
+| `SYS_WIFI_OK` | Wi-Fi **and** MQTT up — actually delivering data | Green, slow (5 s) |
+| `SYS_MQTT_DOWN` | Wi-Fi associated but broker session down (not sending) | Amber, blink (500 ms) |
+| `SYS_GSM_CONN` | GSM modem connecting | Magenta, blink (500 ms) |
+| `SYS_GSM_OK` | GSM + MQTT up | Magenta, slow (5 s) |
+| `SYS_ERROR` | Unrecoverable / error indication | Red, fast (200 ms) |
 
-If the broker is unreachable and NTP never synced, after 60 s the schedule task forces radar control
-so the room is still automated locally (magenta LED). When the clock later syncs, the schedule
-re-asserts authority ("schedule is king") and the failsafe clears.
+### Offline Failsafe (LED override — not a `SystemState`)
+
+The offline failsafe is **not** a member of the `SystemState` enum. It is a separate boolean field,
+`sysData.isOfflineFailsafeActive`, set by the schedule task. In `Indicator::update()` it is checked
+**before** the `SystemState` switch and, when set, forces **solid magenta** and returns early — so it
+**overrides whatever `currentState` actually is** rather than being a state the machine transitions into.
+
+It engages when the broker is unreachable **and** NTP never synced for 60 s: the schedule task forces
+radar control so the room is still automated locally (solid-magenta LED). When the clock later syncs,
+the schedule re-asserts authority ("schedule is king") and the flag clears, returning the LED to the
+normal `SystemState` colour.
+
+> **Note:** Because `SYS_GSM_CONN` / `SYS_GSM_OK` also use magenta (blink / slow), the offline
+> failsafe is deliberately **solid** magenta to remain distinguishable from the GSM states.
 
 ---
 

@@ -20,9 +20,25 @@ namespace Indicator
         digitalWrite(GREEN_PIN, g ? LOW : HIGH);
         digitalWrite(BLUE_PIN, b ? LOW : HIGH);
     }
+    static void setColor1(bool r1, bool g1, bool b1)
+    {
+        // Common Anode: LOW = ON, HIGH = OFF
+        digitalWrite(RED_PIN1, r1 ? LOW : HIGH);
+        digitalWrite(GREEN_PIN1, g1 ? LOW : HIGH);
+        digitalWrite(BLUE_PIN1, b1 ? LOW : HIGH);
+    }
 
     /// Turn the RGB LED fully off.
-    static void ledOff() { setColor(false, false, false); }
+    static void ledOff()
+    {
+        setColor(false, false, false);
+    }
+
+    /// Turn the second RGB LED fully off.
+    static void ledOff1()
+    {
+        setColor1(false, false, false);
+    }
 
     /// Configure the button (input pull-up) and all LED pins; start with LED off.
     void init()
@@ -34,9 +50,13 @@ namespace Indicator
         pinMode(RED_PIN, OUTPUT);
         pinMode(GREEN_PIN, OUTPUT);
         pinMode(BLUE_PIN, OUTPUT);
+        pinMode(RED_PIN1, OUTPUT);
+        pinMode(GREEN_PIN1, OUTPUT);
+        pinMode(BLUE_PIN1, OUTPUT);
 
         // digitalWrite(LED_PIN, LOW);
         ledOff();
+        ledOff1();
     }
 
     /// Blocking: two green blinks (operation succeeded).
@@ -92,9 +112,10 @@ namespace Indicator
             digitalWrite(LED_PIN, LOW);
         }
         // ---> ADD PRIORITY OVERRIDE HERE <---
-        if (sysData.isOfflineFailsafeActive) {
+        if (sysData.isOfflineFailsafeActive)
+        {
             setColor(1, 0, 1); // Solid Magenta (Red + Blue)
-            return; // Exit early to guarantee nothing overlaps this!
+            return;            // Exit early to guarantee nothing overlaps this!
         }
 
         static unsigned long lastBlink = 0;
@@ -198,28 +219,33 @@ namespace Indicator
         static bool longPressTriggered = false;
 
         // digitalRead is LOW when the button is pressed (INPUT_PULLUP)
-        bool currentState = (digitalRead(BUTTON_PIN) == LOW); 
+        bool currentState = (digitalRead(BUTTON_PIN) == LOW);
 
-        if (currentState && !isPressed) {
+        if (currentState && !isPressed)
+        {
             // State 1: Button was JUST pressed down
             isPressed = true;
             pressedTime = millis();
             longPressTriggered = false;
-        } 
-        else if (currentState && isPressed) {
+        }
+        else if (currentState && isPressed)
+        {
             // State 2: Button is BEING HELD down
-            if (!longPressTriggered && (millis() - pressedTime >= 5000)) {
+            if (!longPressTriggered && (millis() - pressedTime >= 5000))
+            {
                 longPressTriggered = true;
                 return BTN_LONG_PRESS;
             }
-        } 
-        else if (!currentState && isPressed) {
+        }
+        else if (!currentState && isPressed)
+        {
             // State 3: Button was JUST released
             isPressed = false;
             unsigned long duration = millis() - pressedTime;
-            
+
             // If it was held for more than 50ms (debounce) but didn't trigger a long press
-            if (!longPressTriggered && duration > 50) { 
+            if (!longPressTriggered && duration > 50)
+            {
                 return BTN_SHORT_PRESS;
             }
         }
@@ -262,10 +288,14 @@ namespace Indicator
     /// LED is lit. Wrong colour => swap the *_PIN defines in Config.h.
     void selfTest()
     {
-        struct { const char *label; int pin; } channels[] = {
-            {"RED_PIN",   RED_PIN},
+        struct
+        {
+            const char *label;
+            int pin;
+        } channels[] = {
+            {"RED_PIN", RED_PIN},
             {"GREEN_PIN", GREEN_PIN},
-            {"BLUE_PIN",  BLUE_PIN},
+            {"BLUE_PIN", BLUE_PIN},
         };
         for (auto &c : channels)
         {

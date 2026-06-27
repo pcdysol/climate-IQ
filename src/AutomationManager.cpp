@@ -199,8 +199,10 @@ namespace AutomationManager
                 switch (incomingEvent.type)
                 {
                 case EVENT_PRESENCE_CHANGED:
-                    // Only process presence if radar automation is actually enabled
-                    if (!sysData.radarAutoMode || blockRadar || !radarReady)
+                    // Only process presence if radar automation is enabled and the user has
+                    // not held the AC off (manualPowerAllowed == false pins it off).
+                    if (!sysData.radarAutoMode || blockRadar || !radarReady ||
+                        !sysData.manualPowerAllowed.load())
                         break;
                     if (incomingEvent.payload == 1)
                     {

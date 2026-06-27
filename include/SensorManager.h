@@ -5,7 +5,7 @@
 
 /**
  * @file SensorManager.h
- * @brief LD2412 radar + HDC1080 climate sensor management.
+ * @brief LD2410C radar + HDC1080 climate sensor management.
  *
  * Owns both sensors and, critically, the radar UART — so ALL radar config
  * (calibration, factory reset, range changes) must happen on the sensor task.

@@ -28,7 +28,7 @@
 #define GSM_RX_PIN      16
 #define GSM_TX_PIN      17
 
-// --- Radar LD2412 (UART) ---
+// --- Radar LD2410C (UART) ---
 #define RADAR_RX_PIN    16
 #define RADAR_TX_PIN    17
 
@@ -36,6 +36,11 @@
 #define RED_PIN         33
 #define GREEN_PIN       32
 #define BLUE_PIN        4
+
+// Second RGB LED (Common Anode) for future use (e.g. status vs. alerts). Currently unpopulated on the PCB.
+#define RED_PIN1 23
+#define GREEN_PIN1 12
+#define BLUE_PIN1 15
 
 // ====================================================================
 // ===================== 2. NETWORK CONFIGURATION ====================
@@ -51,8 +56,11 @@
 #define AP_PASSWORD     "password123"
 
 // ===== MQTT Broker =====
-#define MQTT_SERVER     "107.172.137.233"
+#define MQTT_SERVER     "mqtt.eco-pulse.co"
 #define MQTT_PORT       1883
+
+#define MQTT_USERNAME   "ecopulse_device"
+#define MQTT_PASSWORD   "Mgj5KbQaYWp9rwz0nGUZZtvTOJLhATN0"
 
 // ===== NTP (Internet Time) =====
 // Three servers for resilience: pool.ntp.org is preferred but is frequently slow
@@ -69,7 +77,7 @@
 // ===================== 3.SENSOR & HEALTH TIMINGS ====================
 // ====================================================================
 
-// ===== Radar LD2412 Settings =====
+// ===== Radar LD2410C Settings =====
 #define RADAR_STALE_MS          30000 // 30s without a frame = radar is hung
 
 // Radar Bluetooth control. The radar persists BT state in its OWN flash, so the setting
@@ -115,7 +123,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.15"
+#define FW_VERSION              "1.0.18"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

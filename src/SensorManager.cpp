@@ -1,6 +1,6 @@
 /**
  * @file SensorManager.cpp
- * @brief Implementation of LD2412 radar + HDC1080 sensor management.
+ * @brief Implementation of LD2410C radar + HDC1080 sensor management.
  *
  * The sensor task is the SOLE owner of the radar UART. Normal operation streams
  * "enhanced mode" frames (presence + per-gate energy); maintenance operations
@@ -47,8 +47,8 @@ static bool             learnIsProtocol = false; ///< true = learn just the prot
 static std::atomic<int> learnStatus{0};          ///< 0 idle, 1 in progress, 2 done.
 static std::atomic<int> learnResult{1};          ///< 0 ok, 1 timeout, 2 unknown protocol.
 
-// LD2412 distance-gate width: 0.75 m per gate (datasheet). We use this fixed value
-// instead of querying resolution (the LD2410 0xAB query isn't supported on LD2412).
+// LD2410C distance-gate width: 0.75 m per gate (datasheet 2.2.16 default). We use this
+// fixed value instead of querying resolution (the firmware never changes resolution).
 #define RADAR_GATE_CM 75
 
 // Read the radar's CURRENT stored max gate (its own flash is the source of truth)
@@ -59,17 +59,16 @@ static void readAndStoreRange()
     if (!globalState || !globalState->sensorReady)
         return;
     esp_task_wdt_reset();
-    byte gate = radar.getRange(); // raw max-gate register value (via 0x0012 query)
-    // The same 0x0012 basic-parameter query also refreshes the unmanned duration
+    byte gate = radar.getRange(); // stored max-gate value (via the 0x0061 param query)
+    // The same 0x0061 parameter query also refreshes the unmanned duration
     // (no-one window) — cache it here so the dashboard can show the current value.
     globalState->radarNoOneWindow = radar.getNoOneWindow();
     radar.enhancedMode();
     globalState->lastRadarDataTime = millis();
-    // getRange() returns the raw register value we wrote; the radar's EFFECTIVE max
-    // gate — what it physically detects and what the HLK app shows over BLE — is one
-    // gate less. Subtract it so the dashboard matches the real boundary (gate * 0.75 m).
-    int effGate = (gate >= 1) ? (gate - 1) : 0;
-    globalState->radarRangeCm = effGate * RADAR_GATE_CM;
+    // LD2410C datasheet 1.2.2 / 2.2.3: max detection gate N detects to N * 0.75 m
+    // (e.g. gate 2 -> 1.5 m). The 0x0061 query returns that stored gate N directly,
+    // so the boundary is simply gate * 0.75 m — no offset.
+    globalState->radarRangeCm = gate * RADAR_GATE_CM;
 }
 
 // Snap a requested boundary distance (cm) to the nearest radar gate, apply it, and
@@ -87,35 +86,28 @@ static void applyRadarRange(int cm)
     esp_task_wdt_reset();
     radar.begin();
 
-    const int res = RADAR_GATE_CM; // LD2412 fixed 0.75 m/gate
-    // Target gate the user actually wants to reach (1-14), distance = gate * 0.75 m.
-    // "set to 2 -> within 1.5 m" (2 * 0.75). So round(cm / 0.75 m), clamped 1-14.
+    const int res = RADAR_GATE_CM; // LD2410C fixed 0.75 m/gate
+    // Target gate the user wants (1-8). LD2410C datasheet 1.2.2 / 2.2.3: max gate N
+    // detects to N * 0.75 m ("set to 2 -> within 1.5 m" = 2 * 0.75). So write the
+    // target gate DIRECTLY — round(cm / 0.75 m), clamped 1-8. No +/-1 offset.
     int gate = (cm + res / 2) / res;
     if (gate < 1) gate = 1;
-    if (gate > 14) gate = 14;
-
-    // The radar lands one gate SHORT of the value written (confirmed against the HLK
-    // app, which reads the same register over BLE: writing gate N ends up stored as
-    // N-1, e.g. requesting 6 m / gate 8 physically detected only to 5.25 m / gate 7).
-    // Write gate+1 so the radar's stored boundary equals the target gate. setMaxGate
-    // clamps the result to 14, so the very top end saturates at gate 13 (9.75 m).
-    int writeGate = gate + 1;
-    if (writeGate > 14) writeGate = 14;
+    if (gate > 8) gate = 8;
 
     byte window = radar.getNoOneWindow();
     if (window == 0) window = 5; // preserve current "no-one" window, default 5s
 
     esp_task_wdt_reset();
-    bool ok = radar.setMaxGate((byte)writeGate, (byte)writeGate, window);
+    bool ok = radar.setMaxGate((byte)gate, (byte)gate, window);
     radar.enhancedMode(); // restore engineering stream killed by config mode
     globalState->lastRadarDataTime = millis();
 
     // Read back what the radar ACTUALLY stored (authoritative — this is what the
-    // HLK app also shows). After the +1 compensation this should equal the target gate.
+    // HLK app also shows). It should equal the target gate.
     readAndStoreRange();
 
-    ESP_LOGI(TAG, "setMaxGate %s: req=%dcm target_gate=%d wrote=%d -> radar now reports %dcm",
-             ok ? "OK" : "FAILED", cm, gate, writeGate, globalState->radarRangeCm.load());
+    ESP_LOGI(TAG, "setMaxGate %s: req=%dcm target_gate=%d -> radar now reports %dcm",
+             ok ? "OK" : "FAILED", cm, gate, globalState->radarRangeCm.load());
 }
 
 // Set the radar's "unmanned duration" / no-one window (seconds): how long it keeps
@@ -125,7 +117,7 @@ static void applyRadarRange(int cm)
 //
 // We deliberately do NOT call radar.setNoOneWindow(): that helper derives the max gate
 // from movingThresholds.N, which this firmware never populates (it only issues the
-// 0x0012 basic-parameter query, never the 0x0161 threshold query). With N == 0 it would
+// 0x0061 basic-parameter query, never the threshold query). With N == 0 it would
 // write max gate = 1 and silently collapse the detection range to ~0.75 m. Instead we
 // re-send the CURRENT stored max gate (from getRange()) unchanged and only swap the
 // duration — the same explicit approach applyRadarRange() uses — so the range is preserved.
@@ -144,8 +136,8 @@ static void applyNoOneWindow(int seconds)
     esp_task_wdt_reset();
     radar.begin();
 
-    byte curGate = radar.getRange(); // authoritative stored max gate (0x0012 query)
-    if (curGate < 1) curGate = 14;   // safety: never let a bad read collapse the range
+    byte curGate = radar.getRange(); // authoritative stored max gate (0x0061 query)
+    if (curGate < 1) curGate = 8;    // safety: never let a bad read collapse the range
 
     esp_task_wdt_reset();
     bool ok = radar.setMaxGate(curGate, curGate, (byte)seconds);
@@ -161,7 +153,7 @@ static void applyNoOneWindow(int seconds)
 
 // Disable the radar's Bluetooth so no external BLE app (e.g. HLKRadarTool) can grab the
 // module's single config-mode state machine over the air and starve our UART stream —
-// the root cause of the "frozen radar value" hang. Notes (LD2412 datasheet 2.2.19):
+// the root cause of the "frozen radar value" hang. Notes (LD2410C datasheet 2.2.12):
 //   - Command word 0x00A4, value 0x0000 = OFF (requestBToff() sends exactly this). The
 //     setting is persistent (kept across power-down) and takes effect after a module
 //     REBOOT, so on success we reboot and re-link.
@@ -242,7 +234,7 @@ static bool enableRadarBluetooth()
 namespace SensorManager
 {
     /**
-     * @brief Initialise the HDC1080 (I2C) and the LD2412 radar (UART), bind state.
+     * @brief Initialise the HDC1080 (I2C) and the LD2410C radar (UART), bind state.
      *
      * Keeps the radar bring-up deliberately minimal: drain startup noise, retry
      * begin() a few times, then enable streaming only. Config-mode reads are
@@ -266,9 +258,9 @@ namespace SensorManager
             ESP_LOGI(TAG, "HDC1080 Initialized.");
         }
 
-        // 2. Initialize LD2412 Radar — RX=17, TX=16 @ 115200 (confirmed)
+        // 2. Initialize LD2410C Radar — RX=17, TX=16 @ 256000 (LD2410C factory default)
         sensorSerial.setRxBufferSize(512);
-        sensorSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
+        sensorSerial.begin(256000, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
 
         // Drain startup noise
         unsigned long settleStart = millis();
@@ -278,7 +270,7 @@ namespace SensorManager
             delay(50);
         }
 
-        ESP_LOGI(TAG, "Waiting for LD2412 boot...");
+        ESP_LOGI(TAG, "Waiting for LD2410C boot...");
         bool began = false;
         for (int attempt = 1; attempt <= 3 && !began; attempt++)
         {
@@ -392,8 +384,8 @@ namespace SensorManager
             // --- Per-gate energy for the developer live feed (enhanced mode only) ---
             const MyLD2410::ValuesArray &mvSig = radar.getMovingSignals();
             const MyLD2410::ValuesArray &stSig = radar.getStationarySignals();
-            uint8_t nGates = mvSig.N + 1; // N is the highest gate index reported
-            if (nGates > 14) nGates = 14;
+            uint8_t nGates = mvSig.N + 1; // N is the highest gate index reported (LD2410C: 8)
+            if (nGates > 9) nGates = 9;   // gates 0-8 = 9 energy values
             for (uint8_t i = 0; i < nGates; i++)
             {
                 globalState->radarMovingEnergy[i] = mvSig.values[i];
@@ -447,7 +439,7 @@ namespace SensorManager
     {
         sensorSerial.end();
         delay(200);
-        sensorSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
+        sensorSerial.begin(256000, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
         if (radar.begin())
         {
             radar.enhancedMode();
@@ -464,72 +456,69 @@ namespace SensorManager
 
     static void runAutoCalibration()
     {
-        // LD2412 "dynamic background correction": the radar learns the empty-room
-        // noise floor itself. Per datasheet 2.2.14, the 0x1B status query reports a
-        // flag — 1 = executing, 0 = not executing — NOT a percentage. So completion
-        // is: we first SEE it executing, then wait for it to return to not-executing.
-        ESP_LOGI(TAG, "Calibration: starting radar dynamic background correction...");
+        // LD2410C "background noise detection + automatic sensitivity" (datasheet 2.2.20):
+        // the radar waits ~10 s for the room to clear, measures the empty-room noise floor,
+        // and sets per-gate sensitivities from it.
+        //
+        // We deliberately do NOT poll the 0x1B status query (radar.getAutoStatus()) in a
+        // loop. That query has to enter+exit config mode on every call, which (a) stops the
+        // live data stream the detection runs in, disturbing it, and (b) desyncs the config
+        // flag whenever a config ACK is lost amongst the data frames — making the query
+        // return NOT_SET and the whole routine report a false FAILURE ("error then ready").
+        //
+        // Instead we stay in the live data stream and read the target-state byte the radar
+        // emits DURING calibration (datasheet Table 13): 4 = in progress, 5 = success,
+        // 6 = failed. No config-mode toggling, no desync.
+        ESP_LOGI(TAG, "Calibration: starting radar background noise detection...");
         globalState->radarCalStatus = 1; // in progress
 
-        // Radar enters config mode now and stops emitting data frames, so poll()
-        // can't refresh presence for the whole calibration. Clear the cached value
-        // so the presence LED (pin 2) reflects "radar offline" instead of freezing
-        // on its last reading. poll() repopulates it once streaming resumes.
+        // While calibrating, presence reporting is meaningless — clear the cached value so
+        // the presence LED (pin 2) doesn't freeze on its last reading. poll() repopulates
+        // it once normal streaming resumes.
         globalState->cachedPresence = false;
 
         esp_task_wdt_reset();
-        // Resync to a known state (begin() forces config-mode OFF) so a previous
-        // run can't leave the config state machine desynced — that was making the
-        // *second* calibration fail.
+        // Resync to a known state (begin() forces config-mode OFF) so a previous run can't
+        // leave the config state machine desynced.
         radar.begin();
 
-        bool started = radar.autoThresholds();
+        bool started = radar.autoThresholds(); // 0x000B, default 10 s settle window
+        radar.enhancedMode();                  // ensure we're back in the live data stream
+        globalState->lastRadarDataTime = millis();
+
         if (!started)
         {
             ESP_LOGW(TAG, "Calibration: radar did not accept the command.");
             globalState->radarCalStatus = 3; // failed
-            radar.begin();
-            radar.enhancedMode();
             globalState->lastRadarDataTime = millis();
             return;
         }
 
-        bool sawExecuting = false;
+        bool sawProgress = false;
         bool done = false;
-        uint8_t notSetCount = 0;
-        unsigned long deadline = millis() + 120000UL; // 2-min hard safety cap
+        // Generous cap: 10 s settle + the detection run. Only hit if something is wrong.
+        unsigned long deadline = millis() + 60000UL;
         while (millis() < deadline)
         {
             esp_task_wdt_reset();
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            // Keep the health watchdog from flagging "stale" while config-mode polling
-            // suppresses normal data frames.
-            globalState->lastRadarDataTime = millis();
-
-            AutoStatus st = radar.getAutoStatus();
-            if (st == AutoStatus::NOT_SET)
+            if (radar.check() == MyLD2410::Response::DATA)
             {
-                // Status query itself failed — fail fast rather than hang 2 min.
-                if (++notSetCount >= 5)
-                    break;
-                continue;
+                globalState->lastRadarDataTime = millis();
+                byte st = radar.getStatus(); // 0-3 normal, 4 in-progress, 5 ok, 6 failed
+                if (st == 4)
+                    sawProgress = true;
+                else if (st == 5) { done = true;  break; } // explicit success
+                else if (st == 6) { done = false; break; } // explicit failure
+                else if (sawProgress && st <= 3) { done = true; break; } // ran, back to normal
             }
-            notSetCount = 0;
-
-            if (st == AutoStatus::IN_PROGRESS) // radar reports "executing"
-                sawExecuting = true;
-            else if (sawExecuting) // executing → not-executing = finished
-            {
-                done = true;
-                break;
-            }
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
 
         globalState->radarCalStatus = done ? 2 : 3;
         ESP_LOGI(TAG, "%s", done ? "Calibration complete."
                                  : "Calibration timed out / failed.");
 
-        // Full resync so live streaming resumes and the NEXT run starts clean.
+        // Full resync so live streaming resumes cleanly and the NEXT run starts fresh.
         radar.begin();
         radar.enhancedMode();
         globalState->lastRadarDataTime = millis();
@@ -571,7 +560,7 @@ namespace SensorManager
             // A factory reset reverts the radar to its defaults (max gate 14, unmanned
             // duration 5 s), but the driver still holds the PRE-reset values cached and
             // getRange()/getNoOneWindow() won't re-query while the cache is non-zero. Force
-            // a fresh 0x0012 read, then refresh the dashboard mirrors (range + no-one
+            // a fresh 0x0061 read, then refresh the dashboard mirrors (range + no-one
             // window) — otherwise the UI shows the stale values until the next reboot.
             radar.requestParameters();
             readAndStoreRange();

@@ -63,6 +63,9 @@ namespace CommandProcessor {
                     int cmdNum = doc["ir"].as<int>();
                     targetTemp = (cmdNum >= 3 && cmdNum <= 17) ? (cmdNum + 13) : targetTemp;
                 }
+                // An explicit manual run command releases any manual power hold.
+                sysData.manualPowerAllowed = true;
+                preferences.putBool("manual_pwr", true);
                 AutomationManager::executeACCommand(true, targetTemp, "manual_temp");
 
                 sysData.acAutoState = AUTO_ON_NORMAL;
@@ -89,6 +92,9 @@ namespace CommandProcessor {
             bool turnOn = doc["power_status"].as<bool>();
             
             if (turnOn) {
+                // Explicit manual ON releases any manual power hold.
+                sysData.manualPowerAllowed = true;
+                preferences.putBool("manual_pwr", true);
                 AutomationManager::executeACCommand(true, sysData.currentNormalTemp, "manual_on");
                 sysData.acAutoState = AUTO_ON_NORMAL;
                 xTimerStop(ecoTimer, 0);
@@ -107,6 +113,12 @@ namespace CommandProcessor {
             } else {
                 AutomationManager::executeACCommand(false, 24, "manual_off");
                 sysData.acAutoState = AUTO_OFF;
+                xTimerStop(ecoTimer, 0);
+                xTimerStop(offTimer, 0);
+                // Manual power hold: pin the AC OFF through schedule transitions and radar
+                // presence until the user sends power ON again. Persisted so a reboot keeps it.
+                sysData.manualPowerAllowed = false;
+                preferences.putBool("manual_pwr", false);
             }
             isValidCommand = true;
         }

@@ -422,7 +422,7 @@ namespace GSMManager
             vTaskDelay(pdMS_TO_TICKS(2000));
 
             ESP_LOGI(TAG, "[STEP 6] Logging into MQTT Broker...");
-            cmd = "AT+QMTCONN=0,\"" + gsmClientId + "\"";
+            cmd = "AT+QMTCONN=0,\"" + gsmClientId + "\",\"" + String(MQTT_USERNAME) + "\",\"" + String(MQTT_PASSWORD) + "\"";
             String connResp = sendAT(cmd, 5000);
 
             String connURC = "";

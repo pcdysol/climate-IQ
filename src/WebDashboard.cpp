@@ -745,8 +745,8 @@ window.onload=function(){refresh();};
               {
             if (!server.hasArg("cm")) { server.send(400, "text/plain", "Missing distance."); return; }
             int cm = server.arg("cm").toInt();
-            if (cm < 30)   cm = 30;    // ~gate 0
-            if (cm > 1100) cm = 1100;  // ~gate 13 at 75cm/gate
+            if (cm < 30)  cm = 30;   // ~gate 0
+            if (cm > 600) cm = 600;  // gate 8 at 75cm/gate (LD2410C max range)
             if (SensorManager::requestSetRange(cm))
                 server.send(200, "text/plain", "Range update sent.");
             else

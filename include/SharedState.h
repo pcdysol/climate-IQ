@@ -125,11 +125,11 @@ struct SystemData {
     unsigned long lastRadarDataTime = 0;         ///< millis() of last radar frame (staleness check).
     float radarDistance = 0.0;                   ///< Live target distance (cm).
 
-    // --- Radar Live Engineering Data (per-gate energy, LD2412 = 14 gates) ---
+    // --- Radar Live Engineering Data (per-gate energy, LD2410C = gates 0-8) ---
     // Written by the sensor task in poll(), read by the web task for the dev feed.
     // Torn reads are harmless here (diagnostic only, values 0-100).
-    uint8_t radarMovingEnergy[14] = {0};  ///< Per-gate moving-target energy.
-    uint8_t radarStaticEnergy[14] = {0};  ///< Per-gate static-target energy.
+    uint8_t radarMovingEnergy[9] = {0};  ///< Per-gate moving-target energy (gates 0-8).
+    uint8_t radarStaticEnergy[9] = {0};  ///< Per-gate static-target energy (gates 0-8).
     uint8_t radarGateCount = 0;           ///< Number of valid gates in the arrays above.
 
     // --- Web-triggered radar maintenance (executed on the sensor task) ---
@@ -193,6 +193,12 @@ struct SystemData {
 
     // --- State Machine & Scheduling ---
     std::atomic<AutoState> acAutoState{AUTO_OFF};      ///< Current AC state machine state.
+    // Manual power hold. true = automation/schedule/radar may drive the AC on (normal);
+    // false = a manual power OFF has pinned the AC off, so every ON decision (schedule
+    // segments, radar presence, boot run) is suppressed until the user sends power ON
+    // (or a manual set-temperature) again. MUST default true or the schedule could never
+    // turn the AC on. Persisted to NVS ("manual_pwr") so the hold survives a reboot.
+    std::atomic<bool> manualPowerAllowed{true};        ///< false = manual OFF hold active.       
     std::atomic<bool> isInsideSchedule{false};         ///< Now within a configured segment.
     std::atomic<bool> scheduleBootDone{false};         ///< Schedule has made its first authoritative AC decision this boot. Until then radar may NOT drive the AC ("schedule is king"); the offline failsafe bypasses this.
     bool hasAnySchedule = false;                       ///< Any day has >=1 segment configured.

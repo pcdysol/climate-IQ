@@ -22,7 +22,7 @@
  *                       it on our own receiver. One pass proves emitter, MOSFET power
  *                       switch and receiver together. Falls back to a 10s "press your
  *                       remote" listen so the receiver can still be confirmed alone.
- *   - LD2412 radar .... begin() then watch for streaming data frames (presence/dist)
+ *   - LD2410C radar ... begin() then watch for streaming data frames (presence/dist)
  *   - GSM modem ....... only probed if the radar is absent (they SHARE UART 16/17):
  *                       send AT and look for OK
  *   - WiFi radio ...... scanNetworks() — proves the radio without any credentials
@@ -228,10 +228,10 @@ static void testIR() {
         printRow("IR TX+MOSFET+RX", R_FAIL, "no loopback and no remote seen");
 }
 
-/// LD2412 radar: establish the link, then watch for streaming data frames.
+/// LD2410C radar: establish the link, then watch for streaming data frames.
 static void testRadar() {
     sensorSerial.setRxBufferSize(512);
-    sensorSerial.begin(115200, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
+    sensorSerial.begin(256000, SERIAL_8N1, RADAR_RX_PIN, RADAR_TX_PIN);
 
     // Drain boot noise.
     unsigned long s = millis();
@@ -240,7 +240,7 @@ static void testRadar() {
     bool began = false;
     for (int i = 0; i < 3 && !began; i++) { began = radar.begin(); if (!began) delay(300); }
     if (!began) {
-        printRow("LD2412 radar", R_FAIL, "no response on UART 16/17");
+        printRow("LD2410C radar", R_FAIL, "no response on UART 16/17");
         return; // radarPresent stays false -> the GSM probe will run
     }
 
@@ -259,9 +259,9 @@ static void testRadar() {
         char d[64];
         snprintf(d, sizeof(d), "streaming; presence=%d dist=%dcm",
                  radar.presenceDetected() ? 1 : 0, (int)radar.detectedDistance());
-        printRow("LD2412 radar", R_PASS, d);
+        printRow("LD2410C radar", R_PASS, d);
     } else {
-        printRow("LD2412 radar", R_FAIL, "link up but no data frames");
+        printRow("LD2410C radar", R_FAIL, "link up but no data frames");
     }
 }
 

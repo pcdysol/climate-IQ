@@ -250,6 +250,7 @@ namespace WiFiManager
 
         mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
         mqttClient.setClientId(device_id.c_str());
+        mqttClient.setCredentials(MQTT_USERNAME, MQTT_PASSWORD);   // <-- ADD THIS
         // Detect a dead / half-open broker socket fast: without this the client
         // can believe it is still connected (publish() returns success) while the
         // bytes never reach the broker. A short keepalive forces a PINGREQ and
@@ -360,6 +361,10 @@ namespace WiFiManager
             JsonObject mac = doc[device_id].to<JsonObject>();
             mac["timestamp"] = getTimestamp();
             mac["radar_auto_mode"] = sysData.radarAutoMode ? "Enabled" : "Disabled";
+            // Manual power hold: true = a manual OFF has paused schedule/radar automation
+            // (the AC is pinned off until a manual ON). Re-stated every interval so the
+            // backend always knows the current override state, not just at the OFF moment.
+            mac["manual_off_hold"] = !sysData.manualPowerAllowed.load();
             if (sysData.radarAutoMode)
             {
                 mac["presence_seconds"] = presence_secs;
@@ -394,7 +399,7 @@ namespace WiFiManager
             }
             else if (mqttClient.publish(mqttTopic.c_str(), 0, false, buffer, written))
             {
-                // Telemetry fires every 10s — keep the full payload at DEBUG so
+                // Telemetry fires every 15min — keep the full payload at DEBUG so
                 // normal operation stays quiet but it's there when you need it.
                 ESP_LOGD(TAG, "Telemetry sent: %s", buffer);
             }

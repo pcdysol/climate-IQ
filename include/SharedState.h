@@ -29,7 +29,7 @@ enum EventType {
     EVENT_SCHEDULE_TRIGGER,   ///< Reserved — schedule changes act via ScheduleManager.
     EVENT_ECO_TRIGGER,        ///< Eco countdown elapsed (room empty long enough).
     EVENT_OFF_TRIGGER,        ///< Off countdown elapsed (room empty even longer).
-    EVENT_ENFORCE_TRIGGER,    ///< Periodic 3-min re-assertion of the AC state.
+    EVENT_ENFORCE_TRIGGER,    ///< Periodic 15-min re-assertion of the AC state.
     EVENT_MANUAL_OVERRIDE     ///< A foreign IR remote press was detected on the receiver.
 };
 
@@ -47,7 +47,7 @@ struct SystemEvent {
 // --- Global RTOS handles (defined in main.cpp, declared here for all tasks) ---
 extern QueueHandle_t automationQueue; ///< Inbound event queue for the Automation task.
 extern TimerHandle_t healthTimer;     ///< 30s periodic health check.
-extern TimerHandle_t enforceTimer;    ///< 3-min periodic AC re-assertion.
+extern TimerHandle_t enforceTimer;    ///< 15-min periodic AC re-assertion.
 extern TimerHandle_t ecoTimer;        ///< One-shot: room-empty -> eco setpoint.
 extern TimerHandle_t offTimer;        ///< One-shot: room-empty -> AC off.
 
@@ -193,6 +193,12 @@ struct SystemData {
 
     // --- State Machine & Scheduling ---
     std::atomic<AutoState> acAutoState{AUTO_OFF};      ///< Current AC state machine state.
+    // Manual power hold. true = automation/schedule/radar may drive the AC on (normal);
+    // false = a manual power OFF has pinned the AC off, so every ON decision (schedule
+    // segments, radar presence, boot run) is suppressed until the user sends power ON
+    // (or a manual set-temperature) again. MUST default true or the schedule could never
+    // turn the AC on. Persisted to NVS ("manual_pwr") so the hold survives a reboot.
+    std::atomic<bool> manualPowerAllowed{true};        ///< false = manual OFF hold active.
     std::atomic<bool> isInsideSchedule{false};         ///< Now within a configured segment.
     std::atomic<bool> scheduleBootDone{false};         ///< Schedule has made its first authoritative AC decision this boot. Until then radar may NOT drive the AC ("schedule is king"); the offline failsafe bypasses this.
     bool hasAnySchedule = false;                       ///< Any day has >=1 segment configured.

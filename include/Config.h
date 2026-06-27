@@ -38,9 +38,9 @@
 #define BLUE_PIN        4
 
 // Second RGB LED (Common Anode) for future use (e.g. status vs. alerts). Currently unpopulated on the PCB.
-#define RED_PIN1 23
-#define GREEN_PIN1 12
-#define BLUE_PIN1 15
+#define RED_PIN1        23
+#define GREEN_PIN1      12
+#define BLUE_PIN1       15
 
 // ====================================================================
 // ===================== 2. NETWORK CONFIGURATION ====================
@@ -113,8 +113,8 @@
 // ====================================================================
 // ===================== 5. MQTT TELEMETRY SETTINGS ===================
 // ====================================================================
-#define data_delay_interval 10000
-#define TELEMETRY_INTERVAL  10000
+#define data_delay_interval     10000
+#define TELEMETRY_INTERVAL      900000      //15 minutes in ms
 
 // ====================================================================
 // ===================== 6. OTA (SERVER-BASED) ========================
@@ -123,7 +123,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.16"
+#define FW_VERSION              "1.0.18"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

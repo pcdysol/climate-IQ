@@ -40,7 +40,7 @@ bool pendingReboot = false;      ///< Set by OTA/web to request a deferred reboo
 unsigned long rebootTime = 0;    ///< millis() at which the deferred reboot fires.
 QueueHandle_t automationQueue;   ///< Event queue feeding the Automation task.
 TimerHandle_t healthTimer;       ///< 30s health-check timer.
-TimerHandle_t enforceTimer;      ///< 3-min AC re-assertion timer.
+TimerHandle_t enforceTimer;      ///< 15-min AC re-assertion timer.
 TimerHandle_t ecoTimer;          ///< One-shot room-empty -> eco timer.
 TimerHandle_t offTimer;          ///< One-shot room-empty -> off timer.
 TaskHandle_t sensorsTaskHandle = NULL; ///< Sensor task handle (xTaskNotify target).
@@ -88,6 +88,7 @@ void setup() {
     sysData.flapDelaySec = preferences.getULong("flap_delay", 10);
     sysData.enforcementEnabled = preferences.getBool("enforce_en", true);
     sysData.remoteIrEnabled = preferences.getBool("remote_ir_en", true);
+    sysData.manualPowerAllowed = preferences.getBool("manual_pwr", true);
     // Radar detection range is NOT stored on the ESP32 — the radar keeps it in its
     // own flash. The sensor task reads it back for display once streaming is up.
     
@@ -97,7 +98,7 @@ void setup() {
     automationQueue = xQueueCreate(10, sizeof(SystemEvent));
     
     healthTimer = xTimerCreate("HealthTmr", pdMS_TO_TICKS(30000), pdTRUE, (void *)0, HealthManager::HealthTimerCallback);
-    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(180000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
+    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(600000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
     
     // --- ADD THESE TWO TIMERS ---
     // Note: pdFALSE means they only run exactly once per trigger.

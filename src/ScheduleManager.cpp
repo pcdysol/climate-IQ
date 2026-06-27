@@ -469,6 +469,18 @@ namespace ScheduleManager
                 sysData.currentNormalTemp = seg.temp;
                 preferences.putInt("normal_temp", seg.temp);
 
+                // Manual power hold: a pushed schedule update must not power the AC on while
+                // the user has held it off (manualPowerAllowed == false). Settings are applied
+                // above for a later resume; here we keep the AC OFF and ACK the held state.
+                if (!sysData.manualPowerAllowed.load())
+                {
+                    sysData.acAutoState = AUTO_OFF;
+                    NetworkManager::publishACK("schedule_update", "held_off");
+                    ESP_LOGI(TAG, "Schedule update: manual power hold active — AC kept OFF.");
+                }
+                else
+                {
+
                 // Decide by OCCUPANCY, not by the prior AC state. The schedule defines
                 // the baseline ("inside a segment => AC should be ON at seg.temp"), but
                 // radar's energy saving overrides that baseline: if radar is managing and
@@ -563,6 +575,7 @@ namespace ScheduleManager
                     }
                     sysData.acAutoState = AUTO_ON_NORMAL;
                 }
+                } // end: manual-power-hold else (room occupied / radar-managed branch)
             }
             else
             {
@@ -656,7 +669,7 @@ namespace ScheduleManager
                     // genuine enter/re-enter transition via poll(), since the failsafe leaves
                     // radarAutoMode + isOfflineFailsafeActive on.) Without a schedule there is
                     // nothing to defer to, so cool the room immediately as before.
-                    if (!sysData.hasAnySchedule)
+                    if (!sysData.hasAnySchedule && sysData.manualPowerAllowed.load())
                     {
                         SystemEvent event;
                         event.type = EVENT_PRESENCE_CHANGED;
@@ -751,6 +764,17 @@ namespace ScheduleManager
                     applySegmentRadar(seg.radar);
                     sysData.currentNormalTemp = seg.temp;
                     preferences.putInt("normal_temp", seg.temp);
+
+                    // Manual power hold: keep the AC OFF through this segment. Settings are
+                    // applied above so a later resume uses the right temp; skip all IR.
+                    if (!sysData.manualPowerAllowed.load())
+                    {
+                        sysData.acAutoState = AUTO_OFF;
+                        ESP_LOGI(TAG, "Boot %02d:%02d — manual power hold active, AC kept OFF",
+                                 timeinfo.tm_hour, timeinfo.tm_min);
+                        sysData.scheduleBootDone = true;
+                        continue;
+                    }
 
                     // Did radar already drive the AC during the offline boot wait? At boot the
                     // only other actor is radar, so lastCommandTime > 0 means radar already sent
@@ -859,6 +883,20 @@ namespace ScheduleManager
             {
                 applySegmentRadar(currentSeg.radar);
                 applySegmentParams(currentSeg);
+
+                // Manual power hold: keep settings current but leave the AC OFF.
+                if (!sysData.manualPowerAllowed.load())
+                {
+                    if (!hasPrevSeg || currentSeg.temp != prevSeg.temp)
+                    {
+                        sysData.currentNormalTemp = currentSeg.temp;
+                        preferences.putInt("normal_temp", currentSeg.temp);
+                    }
+                    sysData.acAutoState = AUTO_OFF;
+                    ESP_LOGI(TAG, "%02d:%02d -> manual power hold active, AC kept OFF",
+                             timeinfo.tm_hour, timeinfo.tm_min);
+                    continue;
+                }
 
                 if (!hasPrevSeg || currentSeg.temp != prevSeg.temp)
                 {

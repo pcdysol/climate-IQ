@@ -39,6 +39,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "ScheduleManager.h"
+#include "WiFiManager.h"   // for getChipMAC() — used to build the per-device AP SSID
 #include <nvs_flash.h>
 #include "esp_log.h"
 
@@ -312,6 +313,8 @@ async function pollD(){
     document.getElementById('dvr').innerText=d.radar_ready?'OK':'ERROR';
     document.getElementById('dvhdc').innerText=d.hdc_ok?'OK':'FAULT';
     document.getElementById('dva').innerText=d.radar_auto?'Enabled':'Disabled';
+    var hold=document.getElementById('dvhold');
+    if(hold){if(d.manual_power_allowed===false){hold.innerText='Manual OFF hold — paused';hold.style.color='var(--wait)';}else{hold.innerText='Schedule active';hold.style.color='var(--ok)';}}
     document.getElementById('dvnvs').innerText = d.nvs_used_entries + ' / ' + d.nvs_total_entries;
     var rc=document.getElementById('rcount');if(rc)rc.innerText=d.remote_count;
     if(d.remote_log){
@@ -513,6 +516,7 @@ window.onload=function(){refresh();};
       <div class="dr"><span class="dk">Radar Sensor</span><span class="dv" id="dvr">&#8212;</span></div>
       <div class="dr"><span class="dk">HDC1080 Sensor</span><span class="dv" id="dvhdc">&#8212;</span></div>
       <div class="dr"><span class="dk">Radar Auto Mode</span><span class="dv" id="dva">&#8212;</span></div>
+      <div class="dr"><span class="dk">Automation</span><span class="dv" id="dvhold">&#8212;</span></div>
       <div class="dr"><span class="dk">NVS Flash Used</span><span class="dv" id="dvnvs">&#8212;</span></div>
     </div>
     <div class="card">
@@ -791,6 +795,7 @@ window.onload=function(){refresh();};
                 sx.add(sysData.radarStaticEnergy[i]);
             }
             doc["radar_auto"]   = (bool)sysData.radarAutoMode;
+            doc["manual_power_allowed"] = (bool)sysData.manualPowerAllowed;
             doc["normal_temp"]  = sysData.currentNormalTemp;
             doc["eco_temp"]     = sysData.currentEcoTemp;
             doc["eco_time_min"] = (int)(sysData.TEcoTime / 60000);
@@ -926,8 +931,12 @@ window.onload=function(){refresh();};
     }
 
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    ESP_LOGI(TAG, "Hotspot active: connect to %s", AP_SSID);
+    // Per-device SoftAP name: "ECO_<MAC>" (e.g. ECO_C0CDD6FB941C) so each unit is
+    // uniquely identifiable. getChipMAC() returns the WiFi-STA MAC — the same id used
+    // for the MQTT topic/telemetry — as 12 uppercase hex chars.
+    String apSsid = "ECO_" + WiFiManager::getChipMAC();
+    WiFi.softAP(apSsid.c_str(), AP_PASSWORD);
+    ESP_LOGI(TAG, "Hotspot active: connect to %s", apSsid.c_str());
 
     server.begin();
     sysData.isAPMode = true;

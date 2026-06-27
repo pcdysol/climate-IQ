@@ -92,7 +92,7 @@ namespace AutomationManager
         xQueueSend(automationQueue, &event, 0);
     }
 
-    /// Periodic (3-min) tick: ask the task to re-assert the current AC state.
+    /// Periodic (15-min) tick: ask the task to re-assert the current AC state.
     void EnforceTimerCallback(TimerHandle_t xTimer)
     {
         SystemEvent event;
@@ -103,7 +103,7 @@ namespace AutomationManager
     /**
      * @brief Re-assert the AC to the state the system believes it should be in.
      *
-     * Shared by the 3-minute enforce timer and the immediate manual-override
+     * Shared by the 15-minute enforce timer and the immediate manual-override
      * reaction (when a user presses the physical remote). Re-sends the IR for
      * the current AutoState so a missed frame or a manual change is corrected
      * back to the intended state.
@@ -121,7 +121,7 @@ namespace AutomationManager
         // Before that the AC state is just the power-on default (AUTO_OFF), so
         // enforcing it would blast a spurious OFF while we are still waiting for
         // WiFi / time sync. Once the decision is made, enforce resumes its normal
-        // 3-minute re-assertion.
+        // 15-minute re-assertion.
         if (!sysData.scheduleBootDone.load() && !sysData.isOfflineFailsafeActive)
             return;
 
@@ -199,8 +199,10 @@ namespace AutomationManager
                 switch (incomingEvent.type)
                 {
                 case EVENT_PRESENCE_CHANGED:
-                    // Only process presence if radar automation is actually enabled
-                    if (!sysData.radarAutoMode || blockRadar || !radarReady)
+                    // Only process presence if radar automation is enabled and the user has
+                    // not held the AC off (manualPowerAllowed == false pins it off).
+                    if (!sysData.radarAutoMode || blockRadar || !radarReady ||
+                        !sysData.manualPowerAllowed.load())
                         break;
                     if (incomingEvent.payload == 1)
                     {
@@ -258,7 +260,7 @@ namespace AutomationManager
                     break;
 
                 case EVENT_ENFORCE_TRIGGER:
-                    // Periodic (3-min) re-assertion. Backend can disable JUST this
+                    // Periodic (15-min) re-assertion. Backend can disable JUST this
                     // periodic re-assert via enforcement_control; the manual-override
                     // revert below is deliberately left active either way.
                     if (!sysData.enforcementEnabled.load())
@@ -272,7 +274,7 @@ namespace AutomationManager
                 case EVENT_MANUAL_OVERRIDE:
                     // A user pressed the physical/phone IR remote. Report it to the
                     // cloud (code 4000) and immediately re-assert the correct state
-                    // instead of waiting for the next 3-min enforce tick.
+                    // instead of waiting for the next 15-min enforce tick.
                     NetworkManager::sendAutomationEvent("4000");
                     enforceCurrentState(clockValid);
                     break;

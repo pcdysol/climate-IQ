@@ -21,8 +21,18 @@ namespace Indicator
         digitalWrite(BLUE_PIN, b ? LOW : HIGH);
     }
 
+    static void setColor1(int r, int g, int b)
+    {
+        // Common Anode: LOW = ON, HIGH = OFF
+        digitalWrite(RED_PIN1, r ? LOW : HIGH);
+        digitalWrite(GREEN_PIN1, g ? LOW : HIGH);
+        digitalWrite(BLUE_PIN1, b ? LOW : HIGH);
+    }
+
     /// Turn the RGB LED fully off.
     static void ledOff() { setColor(false, false, false); }
+
+    static void ledOff1() { setColor1(false, false, false); }
 
     /// Configure the button (input pull-up) and all LED pins; start with LED off.
     void init()
@@ -34,9 +44,13 @@ namespace Indicator
         pinMode(RED_PIN, OUTPUT);
         pinMode(GREEN_PIN, OUTPUT);
         pinMode(BLUE_PIN, OUTPUT);
+        pinMode(RED_PIN1, OUTPUT);
+        pinMode(GREEN_PIN1, OUTPUT);
+        pinMode(BLUE_PIN1, OUTPUT);
 
         // digitalWrite(LED_PIN, LOW);
         ledOff();
+        ledOff1();
     }
 
     /// Blocking: two green blinks (operation succeeded).

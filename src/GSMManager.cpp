@@ -537,11 +537,11 @@ namespace GSMManager
             setSystemTimeFromGSM();
         }
 
-        if (millis() - lastTelemetrygsm >= TELEMETRY_INTERVAL)
+        if (millis() - lastTelemetrygsm >= sysData.telemetryIntervalMs.load())
         {
             unsigned long now = millis();
 
-            int total_interval_secs = round(TELEMETRY_INTERVAL / 1000.0);
+            int total_interval_secs = round(sysData.telemetryIntervalMs.load() / 1000.0);
 
             // Sensor task (trackPresenceTime) accumulates every 20ms — just harvest here.
             uint32_t currentAccumulatedMs = sysData.accumulatedPresenceMs.exchange(0, std::memory_order_relaxed);
@@ -561,6 +561,10 @@ namespace GSMManager
             data["timestamp"] = getGSMTime();
 
             data["radar_auto_mode"] = sysData.radarAutoMode ? "Enabled" : "Disabled";
+            // Manual power hold: true = a manual OFF has paused schedule/radar automation
+            // (the AC is pinned off until a manual ON). Re-stated every interval so the
+            // backend always knows the current override state, not just at the OFF moment.
+            data["manual_off_hold"] = !sysData.manualPowerAllowed.load();
             if (sysData.radarAutoMode)
             {
                 data["presence_seconds"] = presence_secs;

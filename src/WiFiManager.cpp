@@ -337,12 +337,12 @@ namespace WiFiManager
         // delivering" state, and the only one that shows the green LED.
         sysData.currentState = SYS_WIFI_OK;
 
-        if (millis() - lastTelemetry > TELEMETRY_INTERVAL)
+        if (millis() - lastTelemetry > sysData.telemetryIntervalMs.load())
         {
             unsigned long now = millis();
             lastTelemetry = now;
 
-            int total_interval_secs = round(TELEMETRY_INTERVAL / 1000.0);
+            int total_interval_secs = round(sysData.telemetryIntervalMs.load() / 1000.0);
 
             // Sensor task (trackPresenceTime) accumulates every 20ms — just harvest here.
             uint32_t currentAccumulatedMs = sysData.accumulatedPresenceMs.exchange(0, std::memory_order_relaxed);
@@ -360,6 +360,7 @@ namespace WiFiManager
             JsonObject mac = doc[device_id].to<JsonObject>();
             mac["timestamp"] = getTimestamp();
             mac["radar_auto_mode"] = sysData.radarAutoMode ? "Enabled" : "Disabled";
+            mac["manual_off_hold"] = !sysData.manualPowerAllowed.load();
             if (sysData.radarAutoMode)
             {
                 mac["presence_seconds"] = presence_secs;

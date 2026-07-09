@@ -199,29 +199,46 @@ bool MyLD2410::processAck()
     outputControl = OutputControl(inBuf[6]);
     break;
   case 0x11B:
-    // LD2412 dynamic background correction status (datasheet 2.2.14): 2-byte value
-    // at inBuf[4..5] — 0x0001 = executing (in progress), 0x0000 = not executing.
-    autoStatus = ((inBuf[4] | (inBuf[5] << 8)) == 1) ? AutoStatus::IN_PROGRESS
-                                                     : AutoStatus::NOT_IN_PROGRESS;
+  {
+    // LD2410C background-noise / auto-threshold status query (0x001B) ACK: 2-byte status
+    // at inBuf[4..5] -- 0x0000 = not in progress, 0x0001 = in progress, 0x0002 = detection
+    // completed. Distinguishing COMPLETED (2) gives the calibration routine an explicit
+    // "finished" signal instead of having to infer it.
+    unsigned int v = inBuf[4] | (inBuf[5] << 8);
+    autoStatus = (v == 1) ? AutoStatus::IN_PROGRESS
+               : (v == 2) ? AutoStatus::COMPLETED
+                          : AutoStatus::NOT_IN_PROGRESS;
     break;
+  }
   case 0x1A3: // Reboot
     isEnhanced = false;
     isConfig = false;
     break;
-  case 0x161: // Query parameters
+  case 0x161: // Query parameters (LD2410C 0x0061 read-parameter ACK)
   {
-    maxRange = inBuf[5];
-    movingThresholds.setN(inBuf[6]);
-    stationaryThresholds.setN(inBuf[7]);
-    // Derive the stationary/no-one offsets from the frame's own gate counts so this
-    // works for both the LD2410 (9 gates) and the LD2412 (14 gates). Upstream hardcoded
-    // 17 and 26, which assumed exactly 9 moving thresholds.
-    byte sStart = 8 + movingThresholds.N + 1;
+    // Response layout after the 2-byte ACK status:
+    //   inBuf[4] = 0xAA header
+    //   inBuf[5] = HARDWARE max gate N (FIXED at 8) — only governs how many per-gate
+    //              sensitivity bytes follow (N+1 moving, then N+1 stationary).
+    //   inBuf[6] = configured max MOVING gate  <-- the effective detection boundary
+    //   inBuf[7] = configured max STATIC  gate
+    //   then (N+1) moving sensitivities, (N+1) stationary sensitivities, then the
+    //   2-byte no-one (unmanned) duration.
+    // IMPORTANT: the boundary the user sets is inBuf[6], NOT inBuf[5]. Reading inBuf[5]
+    // (always 8) made getRange() — and the dashboard "Current Boundary" — permanently
+    // show 6.00 m no matter what range was applied. Sizing the sensitivity arrays (and
+    // therefore the no-one-window offset) from the FIXED inBuf[5] keeps that read stable
+    // even when the configured gate is small (the radar always returns all 9 gates).
+    byte hwMaxGate = inBuf[5];          // fixed array-size driver (=8)
+    maxRange = inBuf[6];                // configured max moving gate = the boundary
+    movingThresholds.setN(hwMaxGate);
+    stationaryThresholds.setN(hwMaxGate);
     for (byte i = 0; i <= movingThresholds.N; i++)
       movingThresholds.values[i] = inBuf[8 + i];
+    byte sStart = 8 + hwMaxGate + 1;    // stationary sensitivities start (8 + 9 = 17)
     for (byte i = 0; i <= stationaryThresholds.N; i++)
       stationaryThresholds.values[i] = inBuf[sStart + i];
-    byte nStart = sStart + stationaryThresholds.N + 1;
+    byte nStart = sStart + hwMaxGate + 1; // no-one duration (17 + 9 = 26)
     noOne_window = inBuf[nStart] | (inBuf[nStart + 1] << 8);
     break;
   }
@@ -270,26 +287,24 @@ bool MyLD2410::processData()
     sData.sTargetDistance = inBuf[6] | (inBuf[7] << 8);
     sData.sTargetSignal = inBuf[8];
 
-    // LD2412 difference vs LD2410: there is NO separate 2-byte "detection distance"
-    // field here — the per-gate data (or the frame tail) follows static energy at
-    // inBuf[9]. Report the ACTIVE target's distance so callers still get a value.
-    if (sData.status == 1)
-      sData.distance = sData.mTargetDistance;
-    else if (sData.status == 2)
-      sData.distance = sData.sTargetDistance;
-    else if (sData.status == 3)
-      sData.distance = sData.mTargetDistance ? sData.mTargetDistance : sData.sTargetDistance;
-    else
-      sData.distance = 0;
+    // LD2410C: a 2-byte "detection distance" field follows the static energy at
+    // inBuf[9..10]; the engineering per-gate block starts AFTER it (inBuf[11+]).
+    // The earlier LD2412 port wrongly assumed this field was absent and read the
+    // gate count straight from inBuf[9..10] — i.e. the detection-distance bytes —
+    // which collapsed the gate count to whatever the live distance happened to be:
+    // 0 when the room was empty (so only gate 0 showed: the "single bar" symptom),
+    // and garbage when occupied. Read the real detection distance directly here.
+    sData.distance = inBuf[9] | (inBuf[10] << 8);
 
     if (inBuf[0] == 1)
-    { // Engineering mode: gate energies begin right after static energy.
-      // inBuf[9]=max moving gate (13), inBuf[10]=max static gate (13),
-      // then (N+1) moving energies, (N+1) static energies, then the light value.
+    { // Engineering mode (LD2410C): after the detection distance come
+      // inBuf[11]=max moving gate (8), inBuf[12]=max static gate (8), then
+      // (N+1) per-gate moving energies, (N+1) per-gate static energies, then the
+      // light value and OUT-pin level. Gates 0-8 => 9 energy values each.
       isEnhanced = true;
-      sData.mTargetSignals.setN(inBuf[9]);
-      sData.sTargetSignals.setN(inBuf[10]);
-      byte *p = inBuf + 11;
+      sData.mTargetSignals.setN(inBuf[11]);
+      sData.sTargetSignals.setN(inBuf[12]);
+      byte *p = inBuf + 13;
       for (byte i = 0; i <= sData.mTargetSignals.N; i++)
         sData.mTargetSignals.values[i] = *(p++);
       for (byte i = 0; i <= sData.sTargetSignals.N; i++)
@@ -554,11 +569,13 @@ bool MyLD2410::requestAuxConfig()
 
 bool MyLD2410::autoThresholds(byte _timeout)
 {
-  // LD2412 "dynamic background correction" start (datasheet 2.2.13): command word
-  // 0x000B with NO value (intra-frame length = 2). _timeout is unused on the LD2412
-  // (kept only for API compatibility with the LD2410 signature).
-  (void)_timeout;
-  byte cmd[4] = {2, 0, 0x0B, 0};
+  // LD2410C "automatic threshold detection" (datasheet command 0x000B): the command
+  // value is a 2-byte detection duration in SECONDS. The room must be empty; the module
+  // records the background noise for that long and derives the per-gate sensitivities.
+  // NOTE: this is the LD2410C form (WITH the duration value) — NOT the LD2412's valueless
+  // 0x000B. Sending 0x000B without the duration made the LD2410C NAK the command, so the
+  // dashboard Calibrate button reported "failed" instantly (the routine never started).
+  byte cmd[6] = {4, 0, 0x0B, 0, _timeout, 0}; // len 4, cmd 0x000B, value = timeout (s)
   if (isConfig)
     return sendCommand(cmd);
   return configMode() && sendCommand(cmd) && configMode(false);
@@ -606,11 +623,15 @@ bool MyLD2410::setResolution(bool fine)
 
 bool MyLD2410::requestParameters()
 {
-  // LD2412 reads basic params (min/max gate, duration, out pin) via 0x0012, not the
-  // LD2410's 0x0061. The ACK 0x0112 sets maxRange / noOne_window (see processAck).
+  // LD2410C reads its parameters (max gate, per-gate sensitivities, no-one
+  // duration) via the 0x0061 query; the ACK 0x0161 sets maxRange / noOne_window
+  // (see processAck). NOTE: this is the LD2410C command — NOT the LD2412's 0x0012
+  // (basicQuery), which this hardware does not understand and silently ignores
+  // (which left getRange()/getNoOneWindow() permanently 0 and the dashboard range
+  // badge stuck on "Default (max)").
   if (isConfig)
-    return sendCommand(LD2410::basicQuery);
-  return configMode() && sendCommand(LD2410::basicQuery) && configMode(false);
+    return sendCommand(LD2410::param);
+  return configMode() && sendCommand(LD2410::param) && configMode(false);
 }
 
 bool MyLD2410::setGateParameters(byte gate, byte movingThreshold, byte stationaryThreshold)
@@ -657,26 +678,30 @@ bool MyLD2410::setStationaryThreshold(byte gate, byte stationaryThreshold)
 
 bool MyLD2410::setMaxGate(byte movingGate, byte staticGate, byte noOneWindow)
 {
-  // LD2412 uses ONE max distance gate via command 0x0002 (datasheet 2.2.5), not the
-  // LD2410's separate moving/static gates (0x0060, which the LD2412 ignores). Use the
-  // larger of the two requested gates. Gates are 0-13 (→ "gate 1-14", 0.75 m each).
-  byte maxGate = (movingGate > staticGate) ? movingGate : staticGate;
-  // Gate value is the gate NUMBER (1-14), distance = value * 0.75 m.
-  if (maxGate > 14)
-    maxGate = 14;
-  if (maxGate < 1)
-    maxGate = 1;
-  // Pull current params first so we preserve the min gate and out-pin polarity
-  // (parsed into basicParam[4]/[8] by the 0x0112 ACK handler).
-  if (!maxRange)
-    requestParameters();
-  byte *cmd = LD2410::basicParam;
-  cmd[5] = maxGate;                       // max distance gate
-  cmd[6] = noOneWindow & 0xFF;            // unmanned duration (low byte)
-  cmd[7] = (noOneWindow >> 8) & 0xFF;     // unmanned duration (high byte)
+  // LD2410C command 0x0060 (datasheet "Set maximum distance gate and unmanned
+  // duration"): separate max moving gate, max static gate and no-one duration.
+  // Gates are 0-8 (0.75 m each). NOTE: this is the LD2410C command — NOT the
+  // LD2412's 0x0002 (basicParam), which this hardware ignores, so the range/no-one
+  // window never actually changed.
+  // LD2410C configurable max-gate range is 2..8 (datasheet); the module rejects 0/1,
+  // so clamp here as a library-level safety net for every caller.
+  if (movingGate < 2)
+    movingGate = 2;
+  if (movingGate > 8)
+    movingGate = 8;
+  if (staticGate < 2)
+    staticGate = 2;
+  if (staticGate > 8)
+    staticGate = 8;
+  byte *cmd = LD2410::maxGate;
+  cmd[6]  = movingGate;                    // param 0x0000: max moving gate (value low byte)
+  cmd[12] = staticGate;                    // param 0x0001: max static gate (value low byte)
+  cmd[18] = noOneWindow;                   // param 0x0002: unmanned duration s (value low byte)
+  // Re-query (0x0061) right after so maxRange / noOne_window in the driver cache
+  // reflect what the radar actually stored — this is what readAndStoreRange() reads back.
   if (isConfig && sendCommand(cmd))
-    return sendCommand(LD2410::basicQuery);
-  return configMode() && sendCommand(cmd) && sendCommand(LD2410::basicQuery) && configMode(false);
+    return sendCommand(LD2410::param);
+  return configMode() && sendCommand(cmd) && sendCommand(LD2410::param) && configMode(false);
 }
 
 bool MyLD2410::setGateParameters(

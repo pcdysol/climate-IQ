@@ -39,6 +39,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include "ScheduleManager.h"
+#include "WiFiManager.h"   // getChipMAC() for the per-device SoftAP SSID
 #include <nvs_flash.h>
 #include "esp_log.h"
 
@@ -303,8 +304,8 @@ async function pollD(){
     if(d.sx&&d.sx.length)buildGates('st-gates',d.sx,false);
     pr.innerText=d.presence?'DETECTED':'EMPTY';
     pr.className='badge '+(d.presence?'green':'red');
-    var ids=['inp-nt','inp-et','inp-etime','inp-otime','inp-fdelay'];
-    var vals=[d.normal_temp,d.eco_temp,d.eco_time_min,d.off_time_min, d.flap_delay_sec];
+    var ids=['inp-nt','inp-et','inp-etime','inp-otime','inp-fdelay','inp-enforce','inp-tele'];
+    var vals=[d.normal_temp,d.eco_temp,d.eco_time_min,d.off_time_min, d.flap_delay_sec,d.enforce_int_min,d.tele_int_sec];
     for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(el&&document.activeElement!==el)el.value=vals[i];}
     var u=d.uptime_s,h=Math.floor(u/3600),m=Math.floor((u%3600)/60),s=u%60;
     document.getElementById('dvh').innerText=(d.free_heap/1024).toFixed(1)+' KB';
@@ -333,6 +334,16 @@ async function saveDP(){
   if(parseInt(ot)<=parseInt(et))return alert('Off Time must be greater than Eco Time!');
   var res=await fetch('/setparams?normal_temp='+n+'&eco_temp='+e+'&eco_time='+et+'&off_time='+ot+'&flap_delay='+fd,{method:'POST'});
   alert(await res.text());
+}
+async function applyEnforce(){
+  var m=parseInt(document.getElementById('inp-enforce').value);
+  if(isNaN(m)||m<1)return alert('Enter at least 1 minute.');
+  try{var res=await fetch('/setparams?enforce_int='+m,{method:'POST'});alert(await res.text());}catch(e){alert('Request failed.');}
+}
+async function applyTele(){
+  var s=parseInt(document.getElementById('inp-tele').value);
+  if(isNaN(s)||s<10)return alert('Enter at least 10 seconds.');
+  try{var res=await fetch('/setparams?tele_int='+s,{method:'POST'});alert(await res.text());}catch(e){alert('Request failed.');}
 }
 async function fetchSched() {
   const box = document.getElementById('dsched');
@@ -505,6 +516,17 @@ window.onload=function(){refresh();};
         <div style="display:flex;align-items:center;"><input type="number" class="pi" id="inp-fdelay" min="0" max="120" value="10"><span class="pu">sec</span></div>
       </div>
       <button class="btn-p" style="margin-top:14px;" onclick="saveDP()">Save Parameters</button>
+    </div>
+    <div class="card">
+      <h3>System Timers</h3>
+      <div class="pr">
+        <div><div class="pn">Enforcement Interval</div><div class="ps">How often the AC state is re-asserted</div></div>
+        <div style="display:flex;align-items:center;gap:6px;"><input type="number" class="pi" id="inp-enforce" min="1" max="240" value="10"><span class="pu">min</span><button class="btn-v" style="margin:0;" onclick="applyEnforce()">Apply</button></div>
+      </div>
+      <div class="pr" style="border:none;">
+        <div><div class="pn">Data Send Interval</div><div class="ps">Telemetry publish period</div></div>
+        <div style="display:flex;align-items:center;gap:6px;"><input type="number" class="pi" id="inp-tele" min="10" max="3600" value="10"><span class="pu">sec</span><button class="btn-v" style="margin:0;" onclick="applyTele()">Apply</button></div>
+      </div>
     </div>
     <div class="card">
       <h3>System Diagnostics</h3>
@@ -796,6 +818,8 @@ window.onload=function(){refresh();};
             doc["eco_time_min"] = (int)(sysData.TEcoTime / 60000);
             doc["off_time_min"] = (int)(sysData.TOffTime / 60000);
             doc["flap_delay_sec"] = sysData.flapDelaySec; // <--- ADD THIS
+            doc["enforce_int_min"] = (int)(sysData.enforceIntervalMs.load() / 60000);
+            doc["tele_int_sec"] = (int)(sysData.telemetryIntervalMs.load() / 1000);
 
             // --- Manual remote-press log (most recent first) ---
             doc["remote_count"] = (int)sysData.remoteOverrideCount.load();
@@ -844,6 +868,20 @@ window.onload=function(){refresh();};
             if (server.hasArg("flap_delay")) {
                 sysData.flapDelaySec = (unsigned long)constrain(server.arg("flap_delay").toInt(), 0, 120);
                 preferences.putULong("flap_delay", sysData.flapDelaySec);
+                changed = true;
+            }
+            if (server.hasArg("enforce_int")) {
+                unsigned long mins = (unsigned long)constrain(server.arg("enforce_int").toInt(), 1, 240);
+                sysData.enforceIntervalMs = mins * 60000UL;
+                preferences.putULong("enforce_int", sysData.enforceIntervalMs.load());
+                // Re-arm the running auto-reload timer with the new period (safe at runtime).
+                xTimerChangePeriod(enforceTimer, pdMS_TO_TICKS(sysData.enforceIntervalMs.load()), 0);
+                changed = true;
+            }
+            if (server.hasArg("tele_int")) {
+                unsigned long secs = (unsigned long)constrain(server.arg("tele_int").toInt(), 10, 3600);
+                sysData.telemetryIntervalMs = secs * 1000UL;
+                preferences.putULong("tele_int", sysData.telemetryIntervalMs.load());
                 changed = true;
             }
             if (changed) {
@@ -926,8 +964,10 @@ window.onload=function(){refresh();};
     }
 
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    ESP_LOGI(TAG, "Hotspot active: connect to %s", AP_SSID);
+    // Per-device hotspot name: "ECO_" + the WiFi-STA MAC, e.g. "ECO_E08CFE05FBD8".
+    String apSsid = String(AP_SSID_PREFIX) + WiFiManager::getChipMAC();
+    WiFi.softAP(apSsid.c_str(), AP_PASSWORD);
+    ESP_LOGI(TAG, "Hotspot active: connect to %s", apSsid.c_str());
 
     server.begin();
     sysData.isAPMode = true;

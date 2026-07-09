@@ -52,7 +52,10 @@
 #define DEV_PASSWORD    "dev1234"
 
 // ===== SoftAP Setup =====
-#define AP_SSID         "SmartAC-Setup"
+// The hotspot name is built at runtime as AP_SSID_PREFIX + the device's WiFi-STA
+// MAC (uppercase hex), e.g. "ECO_E08CFE05FBD8", so every unit is uniquely named.
+// See WebDashboard::startAPMode().
+#define AP_SSID_PREFIX  "ECO_"
 #define AP_PASSWORD     "password123"
 
 // ===== MQTT Broker =====
@@ -114,7 +117,7 @@
 // ===================== 5. MQTT TELEMETRY SETTINGS ===================
 // ====================================================================
 #define data_delay_interval 10000
-#define TELEMETRY_INTERVAL  10000
+#define TELEMETRY_INTERVAL  10000   // 10 seconds (in ms) for telemetry data
 
 // ====================================================================
 // ===================== 6. OTA (SERVER-BASED) ========================
@@ -123,7 +126,7 @@
 // Running firmware version. BUMP THIS every release you build & upload
 // to the server. The device refuses to install a build whose version
 // string equals the one it is already running (unless "force":true).
-#define FW_VERSION              "1.0.18"
+#define FW_VERSION              "1.0.0"
 
 // Max time (ms) the whole download+flash is allowed to take before abort.
 #define OTA_HTTP_TIMEOUT_MS     60000

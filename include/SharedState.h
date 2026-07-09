@@ -184,6 +184,10 @@ struct SystemData {
     std::atomic<bool> enforcementEnabled{true}; ///< false = suppress the periodic 3-min AC re-assertion (manual-override revert still applies).
     std::atomic<bool> remoteIrEnabled{true};    ///< false = stop detecting/logging foreign AC remote presses.
 
+    // --- Runtime-tunable timer intervals (set from the local dashboard, persisted to NVS) ---
+    std::atomic<unsigned long> enforceIntervalMs{600000};  ///< Periodic AC re-assertion period (ms). NVS "enforce_int".
+    std::atomic<unsigned long> telemetryIntervalMs{10000}; ///< Telemetry publish period (ms). NVS "tele_int".
+
     // --- Dedup baseline for the both-off manual-remote-change ACK (report-only) ---
     // These ONLY gate duplicate "manual_remote_change" reports — they never drive the
     // AC and are independent of the schedule's currentNormalTemp. Re-armed (set to -1)

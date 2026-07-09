@@ -89,7 +89,7 @@ static void applyRadarRange(int cm)
     const int res = RADAR_GATE_CM; // LD2410C fixed 0.75 m/gate
     // Target gate the user wants (1-8). LD2410C datasheet 1.2.2 / 2.2.3: max gate N
     // detects to N * 0.75 m ("set to 2 -> within 1.5 m" = 2 * 0.75). So write the
-    // target gate DIRECTLY — round(cm / 0.75 m), clamped 1-8. No +/-1 offset.
+    // target gate DIRECTLY — round(cm / 0.75 m), clamped to the valid 1-8 range.
     int gate = (cm + res / 2) / res;
     if (gate < 1) gate = 1;
     if (gate > 8) gate = 8;
@@ -99,11 +99,12 @@ static void applyRadarRange(int cm)
 
     esp_task_wdt_reset();
     bool ok = radar.setMaxGate((byte)gate, (byte)gate, window);
-    radar.enhancedMode(); // restore engineering stream killed by config mode
     globalState->lastRadarDataTime = millis();
 
     // Read back what the radar ACTUALLY stored (authoritative — this is what the
-    // HLK app also shows). It should equal the target gate.
+    // HLK app also shows). It should equal the target gate. readAndStoreRange()
+    // also re-enables the engineering stream that config mode dropped, so no
+    // separate enhancedMode() call is needed here.
     readAndStoreRange();
 
     ESP_LOGI(TAG, "setMaxGate %s: req=%dcm target_gate=%d -> radar now reports %dcm",
@@ -456,23 +457,23 @@ namespace SensorManager
 
     static void runAutoCalibration()
     {
-        // LD2410C "background noise detection + automatic sensitivity" (datasheet 2.2.20):
-        // the radar waits ~10 s for the room to clear, measures the empty-room noise floor,
-        // and sets per-gate sensitivities from it.
+        // LD2410C "background noise detection + automatic sensitivity": the radar waits a
+        // short "leave the room" window, then measures the empty-room noise floor and sets
+        // per-gate sensitivities from it.
         //
-        // We deliberately do NOT poll the 0x1B status query (radar.getAutoStatus()) in a
-        // loop. That query has to enter+exit config mode on every call, which (a) stops the
-        // live data stream the detection runs in, disturbing it, and (b) desyncs the config
-        // flag whenever a config ACK is lost amongst the data frames — making the query
-        // return NOT_SET and the whole routine report a false FAILURE ("error then ready").
-        //
-        // Instead we stay in the live data stream and read the target-state byte the radar
-        // emits DURING calibration (datasheet Table 13): 4 = in progress, 5 = success,
-        // 6 = failed. No config-mode toggling, no desync.
+        // HOW WE KNOW IT FINISHED -- the important part. The LD2410C data frame's target-
+        // state byte is ONLY ever 0-3 (no target / moving / static / both); there is NO
+        // 4/5/6 "calibration in progress/done" code (that was a wrong assumption carried
+        // over from the LD2412). So the live stream can NEVER tell us when calibration ends.
+        // The ONLY documented completion signal is the 0x001B status query (datasheet):
+        //   0 = not in progress, 1 = in progress, 2 = detection completed.
+        // We poll that until the radar itself reports completion -- however long it takes.
+        // There is deliberately NO fixed time assumption: a real run can exceed two minutes,
+        // so we track the radar's actual status instead of guessing a duration.
         ESP_LOGI(TAG, "Calibration: starting radar background noise detection...");
         globalState->radarCalStatus = 1; // in progress
 
-        // While calibrating, presence reporting is meaningless — clear the cached value so
+        // While calibrating, presence reporting is meaningless -- clear the cached value so
         // the presence LED (pin 2) doesn't freeze on its last reading. poll() repopulates
         // it once normal streaming resumes.
         globalState->cachedPresence = false;
@@ -482,43 +483,77 @@ namespace SensorManager
         // leave the config state machine desynced.
         radar.begin();
 
-        bool started = radar.autoThresholds(); // 0x000B, default 10 s settle window
-        radar.enhancedMode();                  // ensure we're back in the live data stream
+        // 0x000B value = "time to leave the room" before the measurement begins (datasheet;
+        // matches the HLK app's ~10 s countdown). The module then runs the measurement for
+        // its own internal, variable-length window.
+        bool started = radar.autoThresholds(10);
         globalState->lastRadarDataTime = millis();
 
         if (!started)
         {
             ESP_LOGW(TAG, "Calibration: radar did not accept the command.");
             globalState->radarCalStatus = 3; // failed
+            radar.begin();
+            radar.enhancedMode();
             globalState->lastRadarDataTime = millis();
             return;
         }
 
-        bool sawProgress = false;
+        // Poll 0x001B until the radar reports completion. We wait a few seconds between
+        // polls (draining the data stream so the UART RX buffer can't overflow) to keep
+        // config-mode toggling to a minimum during the measurement.
         bool done = false;
-        // Generous cap: 10 s settle + the detection run. Only hit if something is wrong.
-        unsigned long deadline = millis() + 60000UL;
+        bool sawInProgress = false;
+        int  idleStreak = 0;
+        // Pure safety net, far beyond any real run (which can exceed 2 minutes). The NORMAL
+        // exit is the status transition below, NOT this cap.
+        unsigned long deadline = millis() + 240000UL; // 4 min hard stop
         while (millis() < deadline)
         {
-            esp_task_wdt_reset();
-            if (radar.check() == MyLD2410::Response::DATA)
+            // Let the measurement run undisturbed for ~4 s, draining frames, then poll once.
+            for (int i = 0; i < 80 && millis() < deadline; i++)
             {
-                globalState->lastRadarDataTime = millis();
-                byte st = radar.getStatus(); // 0-3 normal, 4 in-progress, 5 ok, 6 failed
-                if (st == 4)
-                    sawProgress = true;
-                else if (st == 5) { done = true;  break; } // explicit success
-                else if (st == 6) { done = false; break; } // explicit failure
-                else if (sawProgress && st <= 3) { done = true; break; } // ran, back to normal
+                radar.check();
+                esp_task_wdt_reset();
+                vTaskDelay(pdMS_TO_TICKS(50));
             }
-            vTaskDelay(pdMS_TO_TICKS(50));
+
+            AutoStatus st = radar.getAutoStatus(); // 0x001B query (brief config-mode toggle)
+            globalState->lastRadarDataTime = millis();
+
+            if (st == AutoStatus::COMPLETED)
+            {
+                done = true; // explicit "detection completed"
+                break;
+            }
+            else if (st == AutoStatus::IN_PROGRESS)
+            {
+                sawInProgress = true;
+                idleStreak = 0;
+            }
+            else if (st == AutoStatus::NOT_IN_PROGRESS)
+            {
+                // 0 also means "not started yet" during the leave window, so only treat it
+                // as finished once we have actually seen it running, confirmed by two
+                // consecutive idle reads (guards against a single transient).
+                if (sawInProgress && ++idleStreak >= 2)
+                {
+                    done = true;
+                    break;
+                }
+            }
+            else // NOT_SET: the status query was lost in the data stream -- resync and retry.
+            {
+                radar.begin();
+            }
         }
 
         globalState->radarCalStatus = done ? 2 : 3;
-        ESP_LOGI(TAG, "%s", done ? "Calibration complete."
-                                 : "Calibration timed out / failed.");
+        ESP_LOGI(TAG, "%s", done ? "Calibration complete (radar reported finished)."
+                                 : "Calibration timed out (no completion within 4 min).");
 
-        // Full resync so live streaming resumes cleanly and the NEXT run starts fresh.
+        // ONLY NOW (measurement finished) is it safe to resync and resume the engineering
+        // stream for the live per-gate feed, and leave the next run a clean state machine.
         radar.begin();
         radar.enhancedMode();
         globalState->lastRadarDataTime = millis();

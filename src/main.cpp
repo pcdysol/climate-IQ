@@ -89,6 +89,8 @@ void setup() {
     sysData.enforcementEnabled = preferences.getBool("enforce_en", true);
     sysData.remoteIrEnabled = preferences.getBool("remote_ir_en", true);
     sysData.manualPowerAllowed = preferences.getBool("manual_pwr", true);
+    sysData.enforceIntervalMs = preferences.getULong("enforce_int", 600000);
+    sysData.telemetryIntervalMs = preferences.getULong("tele_int", TELEMETRY_INTERVAL);
     // Radar detection range is NOT stored on the ESP32 — the radar keeps it in its
     // own flash. The sensor task reads it back for display once streaming is up.
     
@@ -98,7 +100,7 @@ void setup() {
     automationQueue = xQueueCreate(10, sizeof(SystemEvent));
     
     healthTimer = xTimerCreate("HealthTmr", pdMS_TO_TICKS(30000), pdTRUE, (void *)0, HealthManager::HealthTimerCallback);
-    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(180000), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
+    enforceTimer = xTimerCreate("EnforceTmr", pdMS_TO_TICKS(sysData.enforceIntervalMs.load()), pdTRUE, (void *)1, AutomationManager::EnforceTimerCallback);
     
     // --- ADD THESE TWO TIMERS ---
     // Note: pdFALSE means they only run exactly once per trigger.
